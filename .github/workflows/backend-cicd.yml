@@ -95,58 +95,40 @@ jobs:
         echo "instance_ips=${INSTANCE_IPS}" >> $GITHUB_OUTPUT
         echo "instance_count=${INSTANCE_COUNT}" >> $GITHUB_OUTPUT
 
-    - name: 간단한 배포 준비
-      run: |
-        echo "📝 간단한 배포 준비 중..."
-        echo "⚠️ SSM 권한이 없어 외부 헬스체크만 진행합니다"
-        echo "배포는 수동으로 각 인스턴스에서 수행이 필요할 수 있습니다"
-
-    - name: 수동 배포 안내 및 기본 체크
+    - name: 수동 배포 안내
       id: manual-deploy
       run: |
-        echo "⚠️ SSM 권한이 없어 자동 배포를 수행할 수 없습니다"
-        echo "대신 헬스체크를 통해 현재 서비스 상태를 확인합니다"
-        
-        INSTANCE_IPS="${{ steps.get-instances.outputs.instance_ips }}"
-        TOTAL_INSTANCES=${{ steps.get-instances.outputs.instance_count }}
-        
-        echo "📋 체크 대상: ${TOTAL_INSTANCES}개 인스턴스"
-        echo "IP 목록: ${INSTANCE_IPS}"
-        
-        # 수동 배포를 위한 스크립트 제공
+        echo "⚠️ SSM 권한이 없어 자동 배포를 수행할 수 없습니다."
+        echo "각 인스턴스에 접속하여 아래 스크립트를 순서대로 실행해주세요."
         echo ""
-        echo "🔧 각 인스턴스에서 수동으로 실행할 배포 명령 (클러스터 + 스왑 OFF):"
-        echo "===================================================================" 
+        echo "==================================================================="
+        echo "### 📜 1단계: 최초 1회만 필요한 설정 (각 인스턴스별)"
+        echo "==================================================================="
+        echo "# 아래 명령어를 실행한 후, GitHub Secret 'ENV_BACKEND_DEV'의 내용을 붙여넣고 Ctrl+D를 누르세요."
+        echo ""
+        echo "sudo mkdir -p /opt/ktb-chat-backend/backend"
+        echo "sudo touch /opt/ktb-chat-backend/backend/.env"
+        echo "sudo chown ec2-user:ec2-user /opt/ktb-chat-backend/backend/.env"
+        echo "cat << EOF > /opt/ktb-chat-backend/backend/.env"
+        echo ""
+        echo ""
+        echo "==================================================================="
+        echo "### 📜 2단계: 코드 배포 시마다 실행할 스크립트"
+        echo "==================================================================="
         echo "#!/bin/bash"
-        echo "echo '=== 스왑 비활성화 ==='"
+        echo "set -e"
         echo "sudo swapoff -a"
-        echo ""
-        echo "echo '=== 코드 배포 및 재시작 ==='"
         echo "cd /tmp && rm -rf ktb-new"
         echo "git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new"
         echo "sudo -u ec2-user pm2 delete all || true"
         echo "sudo cp -r ktb-new/backend/* /opt/ktb-chat-backend/backend/"
+        echo "sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend"
         echo "cd /opt/ktb-chat-backend/backend"
         echo "sudo -u ec2-user npm ci --production"
-        echo ""
-        echo "# PM2 클러스터 모드로 시작 (2vCPU 활용)"
-        echo "sudo -u ec2-user pm2 start server.js \\"
-        echo "  --name 'ktb-backend-cluster' \\"
-        echo "  --instances 2 \\"
-        echo "  --exec-mode cluster \\"
-        echo "  --max-memory-restart 700M \\"
-        echo "  --node-args='--max-old-space-size=600' \\"
-        echo "  --restart-delay 3000 \\"
-        echo "  --min-uptime 10s"
-        echo ""
-        echo "# 재부팅 시 자동 실행 설정"
+        echo "sudo -u ec2-user pm2 start server.js --name 'ktb-backend-cluster' --instances 2 --exec-mode cluster"
         echo "sudo -u ec2-user pm2 save"
         echo "sudo env PATH=\$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user"
-        echo ""
-        echo "# 상태 확인"
-        echo "sleep 10"
-        echo "curl -f http://localhost:5001/health || echo 'Health check failed!'"
-        echo "sudo -u ec2-user pm2 list"
+        echo "sleep 5 && sudo -u ec2-user pm2 list"
         echo "==================================================================="
         
         # 수동 배포로 가정하고 결과 설정
@@ -236,18 +218,32 @@ jobs:
         echo "- **Public URL**: 응답 성공 ✅" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🔧 수동 배포 가이드" >> $GITHUB_STEP_SUMMARY
-        echo "- **배포 스크립트**: 각 인스턴스에서 아래 명령어 실행" >> $GITHUB_STEP_SUMMARY
+        echo "### 📜 1단계: 최초 1회 설정 (.env 파일 생성)" >> $GITHUB_STEP_SUMMARY
+        echo "- **목표**: 각 EC2 인스턴스에 환경변수 파일 생성" >> $GITHUB_STEP_SUMMARY
+        echo "- **방법**: 아래 스크립트를 각 인스턴스에서 실행 후, GitHub Secret 'ENV_BACKEND_DEV' 내용을 붙여넣고 Ctrl+D를 누르세요." >> $GITHUB_STEP_SUMMARY
         echo '```bash' >> $GITHUB_STEP_SUMMARY
-        echo "cd /tmp && rm -rf ktb-new" >> $GITHUB_STEP_SUMMARY
-        echo "git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user pm2 stop ktb-chat-backend || true" >> $GITHUB_STEP_SUMMARY
-        echo "sudo cp -r ktb-new/backend/* /opt/ktb-chat-backend/backend/" >> $GITHUB_STEP_SUMMARY
-        echo "cd /opt/ktb-chat-backend/backend" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user npm ci --production" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user pm2 start ktb-chat-backend" >> $GITHUB_STEP_SUMMARY
-        echo "curl http://localhost:5001/health" >> $GITHUB_STEP_SUMMARY
+        echo "sudo mkdir -p /opt/ktb-chat-backend/backend" >> $GITHUB_STEP_SUMMARY
+        echo "sudo touch /opt/ktb-chat-backend/backend/.env" >> $GITHUB_STEP_SUMMARY
+        echo "sudo chown ec2-user:ec2-user /opt/ktb-chat-backend/backend/.env" >> $GITHUB_STEP_SUMMARY
+        echo "cat << EOF > /opt/ktb-chat-backend/backend/.env" >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📜 2단계: 코드 배포 (배포 시마다 실행)" >> $GITHUB_STEP_SUMMARY
+        echo "- **목표**: 최신 코드를 배포하고 클러스터 모드로 애플리케이션 실행" >> $GITHUB_STEP_SUMMARY
+        echo "- **방법**: 아래 스크립트를 각 인스턴스에서 실행하세요." >> $GITHUB_STEP_SUMMARY
+        echo '```bash' >> $GITHUB_STEP_SUMMARY
+        echo "#!/bin/bash" >> $GITHUB_STEP_SUMMARY
+        echo "set -e" >> $GITHUB_STEP_SUMMARY
+        echo "sudo swapoff -a" >> $GITHUB_STEP_SUMMARY
+        echo "cd /tmp && rm -rf ktb-new && git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new" >> $GITHUB_STEP_SUMMARY
+        echo "sudo -u ec2-user pm2 delete all || true" >> $GITHUB_STEP_SUMMARY
+        echo "sudo cp -r ktb-new/backend/* /opt/ktb-chat-backend/backend/ && cd /opt/ktb-chat-backend/backend" >> $GITHUB_STEP_SUMMARY
+        echo "sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend" >> $GITHUB_STEP_SUMMARY
+        echo "sudo -u ec2-user npm ci --production" >> $GITHUB_STEP_SUMMARY
+        echo "sudo -u ec2-user pm2 start server.js --name 'ktb-backend-cluster' --instances 2 --exec-mode cluster" >> $GITHUB_STEP_SUMMARY
+        echo "sudo -u ec2-user pm2 save" >> $GITHUB_STEP_SUMMARY
+        echo "sudo env PATH=\$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
         
                  # 배포 상태에 따른 상세 정보 추가
          if [[ "${{ steps.verify-deployment.outputs.healthy_count }}" == "${{ steps.get-instances.outputs.instance_count }}" ]]; then
@@ -256,7 +252,7 @@ jobs:
            echo "- 🚀 **서비스 상태**: 정상 운영 중" >> $GITHUB_STEP_SUMMARY
            echo "- 📈 **가용성**: 100% (모든 서버 정상)" >> $GITHUB_STEP_SUMMARY
          else
-           echo "### ⚠️ 배포 주의사항" >> $GITHUB_STEP_SUMMARY
+        echo "### ⚠️ 배포 주의사항" >> $GITHUB_STEP_SUMMARY
            echo "- **문제 인스턴스**: ${{ steps.verify-deployment.outputs.unhealthy_instances }}" >> $GITHUB_STEP_SUMMARY
            echo "- **가용성**: $(echo "scale=1; ${{ steps.verify-deployment.outputs.healthy_count }} * 100 / ${{ steps.get-instances.outputs.instance_count }}" | bc)%" >> $GITHUB_STEP_SUMMARY
            echo "- **조치 필요**: 문제 인스턴스 수동 확인 및 재시작 권장" >> $GITHUB_STEP_SUMMARY
