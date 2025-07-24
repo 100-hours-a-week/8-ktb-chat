@@ -147,8 +147,7 @@ jobs:
           # PM2 클러스터 모드로 시작
           sudo -u ec2-user pm2 start server.js \
             --name 'ktb-backend-cluster' \
-            --instances 2 \
-            --exec-mode cluster \
+            -i 2 \
             --max-memory-restart 700M \
             --node-args='--max-old-space-size=600'
           sudo -u ec2-user pm2 save
