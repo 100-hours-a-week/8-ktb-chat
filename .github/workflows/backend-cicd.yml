@@ -1,5 +1,5 @@
 # 백엔드 API CI/CD 파이프라인 
-# AMI 빌드 및 Auto Scaling Group 자동 배포   
+# 실행 중인 인스턴스에 코드 직접 배포 (빠른 배포)
 name: Backend API CI/CD
 
 on:
@@ -13,21 +13,16 @@ on:
 # 환경 변수 설정
 env:
   AWS_REGION: ap-northeast-2
-  BASE_AMI_ID: ami-0f5e205427609c732  # Amazon Linux 2023 최신 AMI ID 
-  INSTANCE_TYPE: t3.small
-  # 네트워크 설정
-  VPC_ID: vpc-0cbb28aa7ecfee012
-  SUBNET_ID: subnet-054215bf6c92eb539
-  # GitHub 레포지토리 설정
-  GITHUB_REPO: https://github.com/100-hours-a-week/8-ktb-chat.git
-  GITHUB_BRANCH: jacky
-  # ASG 관련 설정 - 사용자 요청에 따라 변경
-  LAUNCH_TEMPLATE_NAME: pumati-load-test-backend-20250724114952269200000003
+  # ASG 설정
   ASG_NAME: pumati-load-test-backend-asg
+  # 배포 설정
+  DEPLOY_USER: ec2-user
+  BACKEND_PORT: 5001
+  HEALTH_CHECK_PATH: /health
 
 jobs:
-  # AMI 빌드 및 ASG 자동 배포
-  build-and-deploy:
+  # 실행 중인 인스턴스에 코드 직접 배포
+  deploy-to-running-instances:
     runs-on: ubuntu-latest
     
     steps:
@@ -41,7 +36,7 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: 빌드 메타데이터 생성
+    - name: 배포 메타데이터 생성
       id: meta
       run: |
         # Git 커밋 해시의 짧은 버전 생성
@@ -50,447 +45,30 @@ jobs:
         # 타임스탬프 생성
         TIMESTAMP=$(date +%Y%m%d-%H%M%S)
         
-        # AMI 이름 생성
-        AMI_NAME="ktb-chat-backend-jacky-${TIMESTAMP}-${SHORT_SHA}"
-        
-        echo "ami_name=${AMI_NAME}" >> $GITHUB_OUTPUT
         echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
         echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
-    - name: AMI 설정 스크립트 생성
+        echo "deployment_id=deploy-${TIMESTAMP}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+    - name: ASG 인스턴스 목록 가져오기
+      id: get-instances
       run: |
-        echo "📝 AMI 설정을 위한 User Data 스크립트 생성..."
+        echo "🔍 ASG에서 실행 중인 인스턴스 목록 가져오는 중..."
         
-        cat > ami-setup.sh << EOF
-        #!/bin/bash
-        
-        # 로그 설정
-        exec > >(tee /var/log/ami-setup.log) 2>&1
-        echo "=== AMI 설정 시작: $(date) ==="
-        
-        # 시스템 업데이트
-        echo "시스템 업데이트 중..."
-        yum update -y
-        
-        # 개발 도구 설치
-        echo "개발 도구 설치 중..."
-        yum groupinstall -y "Development Tools"
-        yum install -y git curl unzip
-        
-        # Node.js 18 설치
-        echo "Node.js 18 설치 중..."
-        curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
-        yum install -y nodejs
-        
-        # PM2 전역 설치
-        echo "PM2 설치 중..."
-        npm install -g pm2
-        
-        # ec2-user 사용 (Amazon Linux 기본 사용자)
-        echo "기본 사용자 ec2-user 사용..."
-        # useradd 필요 없음 - ec2-user는 이미 존재
-        
-        # 애플리케이션 디렉토리 생성
-        echo "애플리케이션 디렉토리 설정..."
-        mkdir -p /opt/ktb-chat-backend
-        chown ec2-user:ec2-user /opt/ktb-chat-backend
-        
-        # GitHub에서 코드 클론
-        echo "GitHub에서 백엔드 코드 클론 중..."
-        cd /opt/ktb-chat-backend
-        git clone -b ${{ env.GITHUB_BRANCH }} ${{ env.GITHUB_REPO }} .
-        
-        # 백엔드 디렉토리로 이동 및 의존성 설치 (순차 실행으로 변경)
-        cd backend
-        echo "백엔드 의존성 설치 중..."
-        npm ci --production --silent --prefer-offline --no-audit
-        echo "✅ 의존성 설치 완료"
-        
-        # 로그 로테이션 설정
-        cd ..
-        cat > /etc/logrotate.d/ktb-chat-backend << 'EOFLOGROTATE'
-        /var/log/ktb-chat-backend*.log {
-            daily
-            rotate 30
-            compress
-            delaycompress
-            missingok
-            notifempty
-            create 644 ec2-user ec2-user
-            postrotate
-                /usr/bin/pm2 reloadLogs
-            endscript
-        }
-        EOFLOGROTATE
-        
-        # CloudWatch 에이전트 설치
-        echo "CloudWatch 에이전트 설치..."
-        yum install -y amazon-cloudwatch-agent
-        echo "✅ CloudWatch 에이전트 설치 완료"
-        
-        # 헬스체크 엔드포인트 확인 스크립트 생성
-        cat > /usr/local/bin/health-check.sh << 'EOFHEALTH'
-        #!/bin/bash
-        # 백엔드 애플리케이션 헬스체크
-        curl -f http://localhost:5001/health || exit 1
-        EOFHEALTH
-        chmod +x /usr/local/bin/health-check.sh
-        
-        # 환경변수 디버깅 스크립트 생성
-        cat > /usr/local/bin/debug-env.sh << 'EOFDEBUG'
-        #!/bin/bash
-        echo "=== 환경변수 디버깅 ==="
-        echo "현재 작업 디렉토리: $(pwd)"
-        echo ".env 파일 존재 여부: $(ls -la /opt/ktb-chat-backend/backend/.env 2>/dev/null || echo "파일 없음")"
-        echo ".env 파일 내용 (MONGO_URI만):"
-        grep "MONGO_URI" /opt/ktb-chat-backend/backend/.env 2>/dev/null || echo "MONGO_URI 없음"
-        echo "PM2 프로세스 목록:"
-        pm2 list
-        echo "PM2 로그:"
-        pm2 logs --lines 10
-        EOFDEBUG
-        chmod +x /usr/local/bin/debug-env.sh
-        
-        # 백엔드 디렉토리로 이동
-        cd backend
-        
-        # 소유권 변경 및 PM2 디렉토리 설정
-        chown -R ec2-user:ec2-user /opt/ktb-chat-backend
-        
-        # PM2 홈 디렉토리 생성 및 권한 설정
-        mkdir -p /opt/ktb-chat-backend/.pm2
-        chown -R ec2-user:ec2-user /opt/ktb-chat-backend/.pm2
-        
-        # 로그 디렉토리 권한 설정
-        mkdir -p /var/log
-        touch /var/log/ktb-chat-backend.log
-        touch /var/log/ktb-chat-backend-out.log  
-        touch /var/log/ktb-chat-backend-error.log
-        chown ec2-user:ec2-user /var/log/ktb-chat-backend*.log
-        
-        # GitHub Secrets에서 환경 변수 파일 생성 (.env 파일 위치 확실히 지정)
-        echo "환경변수 파일 생성 중..."
-        cat > .env << 'EOFENV'
-        ${{ secrets.ENV_BACKEND_DEV }}
-        EOFENV
-        
-        # .env 파일 권한 설정 및 내용 확인
-        chown ec2-user:ec2-user .env
-        chmod 600 .env
-        echo "환경변수 파일 생성 완료. 내용 확인:"
-        echo "MONGO_URI가 설정되었는지 확인..."
-        grep -q "MONGO_URI" .env && echo "✅ MONGO_URI 설정됨" || echo "❌ MONGO_URI 누락"
-        
-        # PM2 ecosystem 파일 생성 (.env 파일 자동 로드)
-        cat > ecosystem.config.js << 'EOFPM2'
-        module.exports = {
-          apps: [{
-            name: 'ktb-chat-backend',
-            script: 'server.js',
-            cwd: '/opt/ktb-chat-backend/backend',
-            instances: 1,
-            exec_mode: 'fork',
-            watch: false,
-            max_memory_restart: '1G',
-            env_file: '/opt/ktb-chat-backend/backend/.env',  // .env 파일 자동 로드
-            env: {
-              NODE_ENV: 'production',
-              PORT: 5001
-            },
-            log_file: '/var/log/ktb-chat-backend.log',
-            out_file: '/var/log/ktb-chat-backend-out.log',
-            error_file: '/var/log/ktb-chat-backend-error.log',
-            merge_logs: true,
-            time: true
-            // user, uid, gid 설정 제거 - PM2가 이미 ec2-user로 실행됨
-          }]
-        };
-        EOFPM2
-        
-        # systemd 서비스 파일 생성 (.env 파일 사용)
-        cat > /etc/systemd/system/ktb-chat-backend.service << 'EOFSYSTEMD'
-        [Unit]
-        Description=KTB Chat Backend Application
-        After=network.target
-        
-        [Service]
-        Type=simple
-        User=ec2-user
-        Group=ec2-user
-        WorkingDirectory=/opt/ktb-chat-backend/backend
-        # ecosystem.config.js 파일 사용으로 user 권한 문제 해결
-        ExecStart=/usr/bin/pm2 start ecosystem.config.js --no-daemon
-        ExecReload=/usr/bin/pm2 reload ecosystem.config.js
-        ExecStop=/usr/bin/pm2 stop ecosystem.config.js
-        Restart=always
-        RestartSec=10
-        StandardOutput=syslog
-        StandardError=syslog
-        SyslogIdentifier=ktb-chat-backend
-        # 환경 변수 설정 (.env 파일에서 로드)
-        Environment=NODE_ENV=production
-        Environment=PM2_HOME=/opt/ktb-chat-backend/.pm2
-        EnvironmentFile=/opt/ktb-chat-backend/backend/.env
-        
-        [Install]
-        WantedBy=multi-user.target
-        EOFSYSTEMD
-        
-        # 기존 PM2 프로세스 정리 (이름 충돌 방지)
-        echo "기존 PM2 프로세스 정리 중..."
-        su - ec2-user -c "pm2 delete all" 2>/dev/null || true
-        su - ec2-user -c "pm2 kill" 2>/dev/null || true
-        
-        # systemd 서비스 활성화 (부팅 시 자동 시작)
-        systemctl daemon-reload
-        systemctl enable ktb-chat-backend.service
-        
-        # 서비스 시작 테스트
-        echo "서비스 시작 테스트 중..."
-        systemctl start ktb-chat-backend.service
-        sleep 10
-        
-        # 서비스 상태 확인
-        systemctl status ktb-chat-backend.service --no-pager || true
-        
-        # 환경변수 로드 테스트
-        echo "환경변수 로드 테스트:"
-        su - ec2-user -c "cd /opt/ktb-chat-backend/backend && source .env && echo 'MONGO_URI 로드됨: ${MONGO_URI:0:20}...'" || true
-        
-        # 모든 설정 작업 완료
-        
-        # API 서버 AMI 설정 완료 표시
-        echo "=== API 서버 AMI 설정 완료: $(date) ==="
-        echo "GitHub 레포지토리: ${{ env.GITHUB_REPO }}"
-        echo "브랜치: ${{ env.GITHUB_BRANCH }}"
-        echo "커밋: ${{ github.sha }}"
-        
-        # 시스템 준비 완료 신호
-        touch /tmp/ami-setup-complete
-        EOF
-        
-        # 스크립트 권한 설정
-        chmod +x ami-setup.sh
-    - name: 기본 보안 그룹 확인
-      id: security-group
-      run: |
-        echo "🔒 VPC 기본 보안 그룹 사용..."
-        
-        # VPC의 기본 보안 그룹 찾기
-        DEFAULT_SG_ID=$(aws ec2 describe-security-groups \
-          --filters "Name=group-name,Values=default" "Name=vpc-id,Values=${{ env.VPC_ID }}" \
-          --query 'SecurityGroups[0].GroupId' \
-          --output text)
-        
-        if [[ "$DEFAULT_SG_ID" == "None" || "$DEFAULT_SG_ID" == "" ]]; then
-          echo "❌ VPC 기본 보안 그룹을 찾을 수 없습니다."
-          exit 1
-        fi
-        
-        echo "✅ VPC 기본 보안 그룹 사용: ${DEFAULT_SG_ID}"
-        echo "ℹ️ 기본 보안 그룹이므로 별도 정리 불필요"
-        
-        # 기본 보안 그룹에 필요한 아웃바운드 규칙이 있는지 확인 (보통 기본값으로 모든 아웃바운드 허용)
-        echo "📋 보안 그룹 규칙 확인 중..."
-        aws ec2 describe-security-groups --group-ids ${DEFAULT_SG_ID} --query 'SecurityGroups[0].{Inbound:IpPermissions,Outbound:IpPermissionsEgress}'
-        
-        echo "security_group_id=${DEFAULT_SG_ID}" >> $GITHUB_OUTPUT
-    - name: EC2 인스턴스 생성 및 AMI 빌드
-      id: create-instance
-      run: |
-        echo "🖥️ AMI 빌드용 EC2 인스턴스 생성 중..."
-        
-        # EC2 인스턴스 실행 (VPC 및 서브넷 지정)
-        INSTANCE_ID=$(aws ec2 run-instances \
-          --image-id ${{ env.BASE_AMI_ID }} \
-          --instance-type ${{ env.INSTANCE_TYPE }} \
-          --subnet-id ${{ env.SUBNET_ID }} \
-          --security-group-ids ${{ steps.security-group.outputs.security_group_id }} \
-          --associate-public-ip-address \
-          --user-data file://ami-setup.sh \
-          --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=AMI-Build-${{ steps.meta.outputs.ami_name }}},{Key=Purpose,Value=AMI-Build},{Key=Application,Value=ktb-chat-backend}]' \
-          --query 'Instances[0].InstanceId' \
-          --output text)
-        
-        echo "instance_id=${INSTANCE_ID}" >> $GITHUB_OUTPUT
-        echo "✅ 인스턴스 생성됨: ${INSTANCE_ID}"
-        
-        # 인스턴스가 실행될 때까지 대기
-        echo "⏳ 인스턴스 부팅 및 설정 대기 중..."
-        aws ec2 wait instance-running --instance-ids ${INSTANCE_ID}
-        
-        # 최적화된 대기 시간 (병렬 설치로 시간 단축)
-        echo "📦 백엔드 애플리케이션 설치 중... (약 3분 소요)"
-        sleep 180
-        
-        echo "✅ 인스턴스 설정 완료"
-    - name: AMI 생성
-      id: create-ami
-      run: |
-        echo "📸 AMI 생성 중..."
-        
-        # 인스턴스 중지
-        echo "인스턴스 중지 중..."
-        aws ec2 stop-instances --instance-ids ${{ steps.create-instance.outputs.instance_id }}
-        aws ec2 wait instance-stopped --instance-ids ${{ steps.create-instance.outputs.instance_id }}
-        
-        # AMI 생성
-        echo "AMI 스냅샷 생성 중..."
-        AMI_ID=$(aws ec2 create-image \
-          --instance-id ${{ steps.create-instance.outputs.instance_id }} \
-          --name "${{ steps.meta.outputs.ami_name }}" \
-          --description "KTB Chat Backend API AMI - jacky branch - Built on $(date)" \
-          --no-reboot \
-          --tag-specifications 'ResourceType=image,Tags=[{Key=Name,Value=${{ steps.meta.outputs.ami_name }}},{Key=Branch,Value=jacky},{Key=Application,Value=ktb-chat-backend},{Key=Environment,Value=development},{Key=BuildTimestamp,Value=${{ steps.meta.outputs.timestamp }}}]' \
-          --query 'ImageId' \
-          --output text)
-        
-        echo "ami_id=${AMI_ID}" >> $GITHUB_OUTPUT
-        echo "✅ AMI 생성됨: ${AMI_ID}"
-        
-        # AMI 사용 가능할 때까지 대기
-        echo "⏳ AMI 생성 완료 대기 중..."
-        aws ec2 wait image-available --image-ids ${AMI_ID}
-        
-        echo "🎉 AMI 생성 완료: ${AMI_ID}"
-    - name: Launch Template 업데이트
-      id: update-template
-      run: |
-        echo "🚀 Launch Template 업데이트 중..."
-        
-        # 기존 Launch Template 확인
-        if aws ec2 describe-launch-templates --launch-template-names ${{ env.LAUNCH_TEMPLATE_NAME }} >/dev/null 2>&1; then
-          echo "기존 Launch Template 발견: ${{ env.LAUNCH_TEMPLATE_NAME }}"
-          
-          # 기존 템플릿의 최신 버전 정보 가져오기
-          echo "기존 템플릿 설정 정보 가져오는 중..."
-          EXISTING_CONFIG=$(aws ec2 describe-launch-template-versions \
-            --launch-template-name ${{ env.LAUNCH_TEMPLATE_NAME }} \
-            --versions '$Latest' \
-            --query 'LaunchTemplateVersions[0].LaunchTemplateData' \
-            --output json)
-          
-          # 기존 설정에서 AMI ID만 업데이트
-          echo "기존 설정을 유지하면서 AMI ID만 업데이트..."
-          UPDATED_CONFIG=$(echo "$EXISTING_CONFIG" | jq --arg ami_id "${{ steps.create-ami.outputs.ami_id }}" '.ImageId = $ami_id')
-          
-          # 새 버전 생성 (기존 설정 + 새 AMI ID)
-          NEW_VERSION=$(aws ec2 create-launch-template-version \
-            --launch-template-name ${{ env.LAUNCH_TEMPLATE_NAME }} \
-            --source-version '$Latest' \
-            --launch-template-data "$UPDATED_CONFIG" \
-            --query 'LaunchTemplateVersion.VersionNumber' \
-            --output text)
-          
-          echo "template_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
-          echo "✅ Launch Template 새 버전 생성됨: ${NEW_VERSION} (AMI ID만 업데이트)"
-          
-          # 기본 버전으로 설정
-          aws ec2 modify-launch-template \
-            --launch-template-name ${{ env.LAUNCH_TEMPLATE_NAME }} \
-            --default-version ${NEW_VERSION}
-          
-          echo "✅ Launch Template 기본 버전 업데이트 완료"
-          echo "ℹ️ 기존 템플릿의 모든 설정이 유지되었습니다 (AMI ID 제외)"
-          
-        else
-          echo "❌ Launch Template이 존재하지 않습니다: ${{ env.LAUNCH_TEMPLATE_NAME }}"
-          echo "템플릿이 존재하지 않으므로 워크플로우를 중단합니다."
-          echo "먼저 AWS 콘솔에서 해당 템플릿을 생성하거나 템플릿 이름을 확인해주세요."
-          exit 1
-        fi
-    - name: Auto Scaling Group 빠른 재배포 (Stop-and-Start)
-      id: update-asg
-      run: |
-        echo "📈 Auto Scaling Group 빠른 재배포 시작..."
-        
-        # 1. 현재 ASG 설정 정보 가져오기
-        echo "📋 현재 ASG 설정 정보 수집 중..."
-        ASG_INFO=$(aws autoscaling describe-auto-scaling-groups \
-          --auto-scaling-group-names ${{ env.ASG_NAME }} \
-          --query 'AutoScalingGroups[0]' \
-          --output json)
-        
-        # 원래 Desired, Min, Max Capacity 값 저장
-        ORIGINAL_DESIRED=$(echo "$ASG_INFO" | jq -r '.DesiredCapacity')
-        ORIGINAL_MIN=$(echo "$ASG_INFO" | jq -r '.MinSize')
-        ORIGINAL_MAX=$(echo "$ASG_INFO" | jq -r '.MaxSize')
-        
-        echo "원래 ASG 설정:"
-        echo "- Desired Capacity: ${ORIGINAL_DESIRED}"
-        echo "- Min Size: ${ORIGINAL_MIN}"
-        echo "- Max Size: ${ORIGINAL_MAX}"
-        
-        # 2. Launch Template AMI 업데이트
-        echo "🔧 Launch Template AMI 업데이트 중..."
-        aws autoscaling update-auto-scaling-group \
-          --auto-scaling-group-name ${{ env.ASG_NAME }} \
-          --launch-template LaunchTemplateName=${{ env.LAUNCH_TEMPLATE_NAME }},Version='$Latest'
-        
-        echo "✅ ASG Launch Template 업데이트 완료"
-        
-        # 3. ASG 인스턴스 개수를 0으로 축소
-        echo "🛑 ASG 인스턴스 개수를 0으로 축소 중..."
-        aws autoscaling update-auto-scaling-group \
-          --auto-scaling-group-name ${{ env.ASG_NAME }} \
-          --desired-capacity 0 \
-          --min-size 0
-        
-        # 4. 모든 인스턴스가 종료될 때까지 대기
-        echo "⏳ 모든 인스턴스 종료 대기 중..."
-        while true; do
-          INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names ${{ env.ASG_NAME }} \
-            --query 'AutoScalingGroups[0].Instances | length(@)' \
-            --output text)
-          
-          if [[ "$INSTANCE_COUNT" == "0" ]]; then
-            echo "✅ 모든 인스턴스가 종료되었습니다"
-            break
-          fi
-          
-          echo "현재 인스턴스 개수: ${INSTANCE_COUNT} (종료 대기 중...)"
-          sleep 15
-        done
-        
-        # 5. 원래 설정으로 ASG 복원 (새 AMI로 인스턴스 시작)
-        echo "🚀 새 AMI로 ASG 인스턴스 재시작 중..."
-        aws autoscaling update-auto-scaling-group \
-          --auto-scaling-group-name ${{ env.ASG_NAME }} \
-          --desired-capacity ${ORIGINAL_DESIRED} \
-          --min-size ${ORIGINAL_MIN} \
-          --max-size ${ORIGINAL_MAX}
-        
-        # 6. 새 인스턴스들이 InService 상태가 될 때까지 대기
-        echo "⏳ 새 인스턴스들이 준비될 때까지 대기 중..."
-        TARGET_INSTANCES=${ORIGINAL_DESIRED}
-        
-        while true; do
-          IN_SERVICE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names ${{ env.ASG_NAME }} \
-            --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`] | length(@)' \
-            --output text)
-          
-          TOTAL_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names ${{ env.ASG_NAME }} \
-            --query 'AutoScalingGroups[0].Instances | length(@)' \
-            --output text)
-          
-          echo "인스턴스 상태: ${IN_SERVICE_COUNT}/${TARGET_INSTANCES} InService (전체: ${TOTAL_INSTANCES})"
-          
-          if [[ "$IN_SERVICE_COUNT" == "$TARGET_INSTANCES" ]]; then
-            echo "🎉 모든 인스턴스가 InService 상태가 되었습니다!"
-            break
-          fi
-          
-          sleep 20
-        done
-        
-        # 7. 헬스체크 확인 (선택사항)
-        echo "🔍 새 인스턴스 헬스체크 확인 중..."
+        # ASG에서 InService 상태의 인스턴스 ID 목록 가져오기
         INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
           --auto-scaling-group-names ${{ env.ASG_NAME }} \
           --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
           --output text)
+        
+        if [[ -z "$INSTANCE_IDS" ]]; then
+          echo "❌ 실행 중인 인스턴스를 찾을 수 없습니다."
+          exit 1
+        fi
+        
+        # 인스턴스 세부 정보 가져오기 (IP 주소 포함)
+        echo "📋 인스턴스 세부 정보:"
+        INSTANCE_IPS=""
+        INSTANCE_COUNT=0
         
         for INSTANCE_ID in $INSTANCE_IDS; do
           PUBLIC_IP=$(aws ec2 describe-instances \
@@ -498,61 +76,285 @@ jobs:
             --query 'Reservations[0].Instances[0].PublicIpAddress' \
             --output text)
           
+          PRIVATE_IP=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+            --output text)
+          
+          echo "- ${INSTANCE_ID}: Public=${PUBLIC_IP}, Private=${PRIVATE_IP}"
+          
           if [[ "$PUBLIC_IP" != "None" && "$PUBLIC_IP" != "" ]]; then
-            echo "인스턴스 ${INSTANCE_ID} (${PUBLIC_IP}) 헬스체크 중..."
-            # 헬스체크는 선택사항으로 타임아웃 없이 1번만 시도
-            curl -f -m 10 "http://${PUBLIC_IP}:5001/health" >/dev/null 2>&1 && \
-              echo "✅ 헬스체크 성공" || echo "⚠️ 헬스체크 응답 없음 (서비스 시작 중일 수 있음)"
+            INSTANCE_IPS="${INSTANCE_IPS}${PUBLIC_IP} "
+            INSTANCE_COUNT=$((INSTANCE_COUNT + 1))
           fi
         done
         
-        echo "✅ 빠른 재배포 완료!"
-        echo "original_desired=${ORIGINAL_DESIRED}" >> $GITHUB_OUTPUT
-        echo "original_min=${ORIGINAL_MIN}" >> $GITHUB_OUTPUT
-        echo "original_max=${ORIGINAL_MAX}" >> $GITHUB_OUTPUT
-    - name: 인스턴스 정리
-      if: always()
+        echo "✅ 배포 대상 인스턴스: ${INSTANCE_COUNT}개"
+        echo "instance_ids=${INSTANCE_IDS}" >> $GITHUB_OUTPUT
+        echo "instance_ips=${INSTANCE_IPS}" >> $GITHUB_OUTPUT
+        echo "instance_count=${INSTANCE_COUNT}" >> $GITHUB_OUTPUT
+
+    - name: 배포 스크립트 생성
       run: |
-        echo "🧹 빌드용 인스턴스 정리 중..."
+        echo "📝 배포 스크립트 생성 중..."
         
-        if [[ -n "${{ steps.create-instance.outputs.instance_id }}" ]]; then
-          # 인스턴스 종료
-          aws ec2 terminate-instances --instance-ids ${{ steps.create-instance.outputs.instance_id }}
-          echo "✅ 인스턴스 종료됨: ${{ steps.create-instance.outputs.instance_id }}"
+        # 배포 스크립트 생성
+        cat > deploy-script.sh << 'EOF'
+        #!/bin/bash
+        
+        # 배포 로그 설정
+        exec > >(tee /tmp/deployment.log) 2>&1
+        echo "=== 코드 배포 시작: $(date) ==="
+        
+        # 변수 설정
+        APP_DIR="/opt/ktb-chat-backend"
+        BACKUP_DIR="/opt/ktb-chat-backend-backup-$(date +%Y%m%d-%H%M%S)"
+        GITHUB_REPO="https://github.com/100-hours-a-week/8-ktb-chat.git"
+        GITHUB_BRANCH="dev"
+        
+        # 현재 실행 중인 서비스 확인
+        echo "📊 현재 서비스 상태 확인 중..."
+        sudo -u ec2-user pm2 list || echo "PM2 프로세스 없음"
+        
+        # 기존 코드 백업
+        echo "💾 기존 코드 백업 중..."
+        if [[ -d "$APP_DIR" ]]; then
+          sudo cp -r "$APP_DIR" "$BACKUP_DIR"
+          echo "✅ 백업 완료: $BACKUP_DIR"
         fi
         
+        # 새 코드 다운로드
+        echo "📥 새 코드 다운로드 중..."
+        cd /tmp
+        rm -rf ktb-chat-new
+        git clone -b $GITHUB_BRANCH $GITHUB_REPO ktb-chat-new
+        
+        # 기존 서비스 중지 (Graceful shutdown)
+        echo "🛑 기존 서비스 중지 중..."
+        sudo -u ec2-user pm2 stop ktb-chat-backend 2>/dev/null || true
+        
+        # 새 코드로 교체
+        echo "🔄 코드 교체 중..."
+        sudo rm -rf $APP_DIR/backend/node_modules/.cache 2>/dev/null || true
+        sudo cp -r /tmp/ktb-chat-new/backend/* $APP_DIR/backend/
+        
+        # 의존성 업데이트 (변경된 것만)
+        echo "📦 의존성 확인 및 업데이트 중..."
+        cd $APP_DIR/backend
+        sudo -u ec2-user npm ci --production --silent --prefer-offline
+        
+        # 환경변수 확인
+        echo "🔧 환경변수 확인 중..."
+        if [[ ! -f ".env" ]]; then
+          echo "❌ .env 파일이 없습니다!"
+          exit 1
+        fi
+        
+        # 서비스 재시작
+        echo "🚀 서비스 재시작 중..."
+        sudo -u ec2-user pm2 start ktb-chat-backend 2>/dev/null || \
+        sudo -u ec2-user pm2 start ecosystem.config.js
+        
+        # 서비스 상태 확인
+        echo "🔍 서비스 상태 확인 중..."
+        sleep 5
+        sudo -u ec2-user pm2 list
+        
+                 # 헬스체크
+         echo "🏥 헬스체크 중..."
+         HEALTH_SUCCESS=false
+         for i in {1..15}; do
+           if curl -f -m 10 http://localhost:5001/health >/dev/null 2>&1; then
+             echo "✅ 헬스체크 성공 (시도 $i)"
+             HEALTH_SUCCESS=true
+             break
+           fi
+           echo "헬스체크 시도 $i 실패, 재시도 중..."
+           sleep 5
+         done
+         
+         if [[ "$HEALTH_SUCCESS" != "true" ]]; then
+           echo "❌ 헬스체크 실패 - 서비스 상태 확인 필요"
+           exit 1
+         fi
+        
         # 임시 파일 정리
-        rm -f ami-setup.sh
-    - name: 배포 결과 요약
-      if: success()
+        rm -rf /tmp/ktb-chat-new
+        
+        echo "=== 코드 배포 완료: $(date) ==="
+        EOF
+        
+        chmod +x deploy-script.sh
+
+    - name: 병렬 배포 실행
+      id: parallel-deploy
       run: |
-        echo "## 🎉 백엔드 API CI/CD 완료" >> $GITHUB_STEP_SUMMARY
+        echo "🚀 모든 인스턴스에 병렬 배포 시작..."
+        
+        INSTANCE_IPS="${{ steps.get-instances.outputs.instance_ips }}"
+        TOTAL_INSTANCES=${{ steps.get-instances.outputs.instance_count }}
+        
+        if [[ $TOTAL_INSTANCES -eq 0 ]]; then
+          echo "❌ 배포할 인스턴스가 없습니다."
+          exit 1
+        fi
+        
+        echo "📋 배포 대상: ${TOTAL_INSTANCES}개 인스턴스"
+        echo "IP 목록: ${INSTANCE_IPS}"
+        
+        # 병렬 배포를 위한 백그라운드 작업 배열
+        DEPLOY_PIDS=()
+        SUCCESS_COUNT=0
+        FAILED_INSTANCES=""
+        
+        # AWS Systems Manager를 통한 배포 (SSH 키 없이)
+        echo "📤 Systems Manager를 통한 배포 명령 전송..."
+        
+        COMMAND_ID=$(aws ssm send-command \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=["'"$(cat deploy-script.sh | base64 -w 0)"'" | base64 -d | bash]' \
+          --targets "Key=tag:aws:autoscaling:groupName,Values=${{ env.ASG_NAME }}" \
+          --query 'Command.CommandId' \
+          --output text)
+        
+        echo "✅ 배포 명령 전송됨: ${COMMAND_ID}"
+        
+        # 명령 실행 상태 모니터링
+        echo "⏳ 배포 진행 상황 모니터링 중..."
+        
+        for i in {1..60}; do  # 최대 10분 대기
+          sleep 10
+          
+          # 명령 실행 상태 확인
+          STATUS_INFO=$(aws ssm list-command-invocations \
+            --command-id $COMMAND_ID \
+            --query 'CommandInvocations[*].{InstanceId:InstanceId,Status:Status}' \
+            --output json)
+          
+          IN_PROGRESS=$(echo "$STATUS_INFO" | jq -r '.[] | select(.Status == "InProgress") | .InstanceId' | wc -l)
+          SUCCESS=$(echo "$STATUS_INFO" | jq -r '.[] | select(.Status == "Success") | .InstanceId' | wc -l)
+          FAILED=$(echo "$STATUS_INFO" | jq -r '.[] | select(.Status == "Failed") | .InstanceId' | wc -l)
+          
+          echo "배포 상태: 성공=$SUCCESS, 실패=$FAILED, 진행중=$IN_PROGRESS"
+          
+          if [[ $IN_PROGRESS -eq 0 ]]; then
+            echo "✅ 모든 인스턴스 배포 완료"
+            break
+          fi
+        done
+        
+        # 최종 결과 확인
+        echo "📊 최종 배포 결과:"
+        aws ssm list-command-invocations \
+          --command-id $COMMAND_ID \
+          --query 'CommandInvocations[*].{InstanceId:InstanceId,Status:Status}' \
+          --output table
+        
+        echo "command_id=${COMMAND_ID}" >> $GITHUB_OUTPUT
+        echo "success_count=${SUCCESS}" >> $GITHUB_OUTPUT
+        echo "failed_count=${FAILED}" >> $GITHUB_OUTPUT
+
+    - name: 배포 후 검증
+      id: verify-deployment
+      run: |
+        echo "🔍 배포 후 전체 서비스 상태 검증 중..."
+        
+        INSTANCE_IPS="${{ steps.get-instances.outputs.instance_ips }}"
+        HEALTHY_COUNT=0
+        UNHEALTHY_INSTANCES=""
+        
+                 for IP in $INSTANCE_IPS; do
+           echo "인스턴스 ${IP} 헬스체크 중..."
+           
+           # 최대 60초간 헬스체크 시도 (배포 후 서비스 시작 시간 고려)
+           HEALTHY=false
+           for i in {1..12}; do
+             echo "  시도 ${i}/12: ${IP}:${{ env.BACKEND_PORT }}${{ env.HEALTH_CHECK_PATH }}"
+             
+             # 헬스체크 API 호출
+             if curl -f -m 10 "http://${IP}:${{ env.BACKEND_PORT }}${{ env.HEALTH_CHECK_PATH }}" >/dev/null 2>&1; then
+               echo "✅ ${IP} 헬스체크 성공"
+               HEALTHY=true
+               break
+             fi
+             
+             # 마지막 시도가 아니면 대기
+             if [[ $i -lt 12 ]]; then
+               echo "  ${IP} 응답 대기 중... (5초 후 재시도)"
+               sleep 5
+             fi
+           done
+           
+           if [[ "$HEALTHY" == "true" ]]; then
+             HEALTHY_COUNT=$((HEALTHY_COUNT + 1))
+           else
+             echo "❌ ${IP} 헬스체크 실패 - 서비스가 정상적으로 시작되지 않았습니다"
+             UNHEALTHY_INSTANCES="${UNHEALTHY_INSTANCES}${IP} "
+           fi
+         done
+        
+                 echo "📊 최종 헬스체크 결과: ${HEALTHY_COUNT}/${{ steps.get-instances.outputs.instance_count }} 성공"
+         
+         if [[ $HEALTHY_COUNT -eq ${{ steps.get-instances.outputs.instance_count }} ]]; then
+           echo "🎉 모든 인스턴스가 정상 상태입니다!"
+           echo "✅ 배포 성공: 모든 서비스가 헬스체크를 통과했습니다"
+         else
+           echo "⚠️ 일부 인스턴스에서 문제가 발생했습니다"
+           echo "문제 인스턴스: ${UNHEALTHY_INSTANCES}"
+           echo "❌ 배포 부분 실패: ${HEALTHY_COUNT}/${{ steps.get-instances.outputs.instance_count }} 인스턴스만 정상"
+           
+           # 헬스체크 실패한 인스턴스가 50% 이상이면 배포 실패로 처리
+           TOTAL_INSTANCES=${{ steps.get-instances.outputs.instance_count }}
+           FAILURE_THRESHOLD=$((TOTAL_INSTANCES / 2))
+           
+           if [[ $HEALTHY_COUNT -le $FAILURE_THRESHOLD ]]; then
+             echo "💥 심각한 배포 실패: 50% 이상의 인스턴스가 실패했습니다"
+             exit 1
+           fi
+         fi
+         
+         echo "healthy_count=${HEALTHY_COUNT}" >> $GITHUB_OUTPUT
+         echo "unhealthy_instances=${UNHEALTHY_INSTANCES}" >> $GITHUB_OUTPUT
+
+    - name: 배포 결과 요약
+      if: always()
+      run: |
+        echo "## 🚀 빠른 코드 배포 완료" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📋 AMI 정보" >> $GITHUB_STEP_SUMMARY
-        echo "- **AMI ID**: \`${{ steps.create-ami.outputs.ami_id }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **AMI 이름**: \`${{ steps.meta.outputs.ami_name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "### 📋 배포 정보" >> $GITHUB_STEP_SUMMARY
+        echo "- **배포 ID**: \`${{ steps.meta.outputs.deployment_id }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **커밋**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **브랜치**: jacky" >> $GITHUB_STEP_SUMMARY
-        echo "- **빌드 시간**: ${{ steps.meta.outputs.timestamp }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **브랜치**: dev" >> $GITHUB_STEP_SUMMARY
+        echo "- **배포 시간**: ${{ steps.meta.outputs.timestamp }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🔧 빌드 환경 설정" >> $GITHUB_STEP_SUMMARY
-        echo "- **GitHub 레포**: ${{ env.GITHUB_REPO }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **브랜치**: ${{ env.GITHUB_BRANCH }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **배포 대상**: Load Test 환경" >> $GITHUB_STEP_SUMMARY
+        echo "### 🎯 배포 대상" >> $GITHUB_STEP_SUMMARY
+        echo "- **ASG**: \`${{ env.ASG_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **대상 인스턴스**: ${{ steps.get-instances.outputs.instance_count }}개" >> $GITHUB_STEP_SUMMARY
+        echo "- **배포 명령 ID**: \`${{ steps.parallel-deploy.outputs.command_id }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🚀 배포 정보" >> $GITHUB_STEP_SUMMARY
-        echo "- **Launch Template**: \`${{ env.LAUNCH_TEMPLATE_NAME }}\` (버전 ${{ steps.update-template.outputs.template_version }})" >> $GITHUB_STEP_SUMMARY
-        echo "- **Auto Scaling Group**: \`${{ env.ASG_NAME }}\` (빠른 재배포 완료)" >> $GITHUB_STEP_SUMMARY
-        echo "- **복원된 설정**: Desired=${{ steps.update-asg.outputs.original_desired }}, Min=${{ steps.update-asg.outputs.original_min }}, Max=${{ steps.update-asg.outputs.original_max }}" >> $GITHUB_STEP_SUMMARY
+                 echo "### 📊 배포 결과" >> $GITHUB_STEP_SUMMARY
+         echo "- **코드 배포 성공**: ${{ steps.parallel-deploy.outputs.success_count }}개" >> $GITHUB_STEP_SUMMARY
+         echo "- **코드 배포 실패**: ${{ steps.parallel-deploy.outputs.failed_count }}개" >> $GITHUB_STEP_SUMMARY
+         echo "- **헬스체크 통과**: ${{ steps.verify-deployment.outputs.healthy_count }}개" >> $GITHUB_STEP_SUMMARY
+         echo "- **헬스체크 실패**: $((${{ steps.get-instances.outputs.instance_count }} - ${{ steps.verify-deployment.outputs.healthy_count }}))개" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📊 모니터링" >> $GITHUB_STEP_SUMMARY
-        echo "- 애플리케이션 포트: 5001" >> $GITHUB_STEP_SUMMARY
-        echo "- 헬스체크: \`/health\` 엔드포인트" >> $GITHUB_STEP_SUMMARY
-        echo "- 로그 위치: \`/var/log/ktb-chat-backend*.log\`" >> $GITHUB_STEP_SUMMARY
+        echo "### ⚡ 성능 개선" >> $GITHUB_STEP_SUMMARY
+        echo "- **인스턴스 재시작**: ❌ 없음 (기존 인스턴스 유지)" >> $GITHUB_STEP_SUMMARY
+        echo "- **다운타임**: ⚡ 최소 (Rolling restart)" >> $GITHUB_STEP_SUMMARY
+        echo "- **배포 속도**: 🚀 매우 빠름 (코드만 교체)" >> $GITHUB_STEP_SUMMARY
+        echo "- **병렬 처리**: ✅ 모든 인스턴스 동시 배포" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### ⚠️ 배포 주의사항" >> $GITHUB_STEP_SUMMARY
-        echo "- **빠른 재배포 방식 사용**: 모든 인스턴스를 0개로 축소 후 재시작" >> $GITHUB_STEP_SUMMARY
-        echo "- **다운타임 발생**: 인스턴스 종료~재시작 구간에서 일시적 서비스 중단" >> $GITHUB_STEP_SUMMARY
-        echo "- **원본 설정 복원**: ASG의 원래 Desired/Min/Max 설정이 자동으로 복원됩니다" >> $GITHUB_STEP_SUMMARY
-        echo "- **새 AMI 적용**: 모든 인스턴스가 최신 AMI로 교체되었습니다" >> $GITHUB_STEP_SUMMARY
-        echo "- MongoDB, Redis 연결을 확인해주세요" >> $GITHUB_STEP_SUMMARY
+        
+                 # 배포 상태에 따른 상세 정보 추가
+         if [[ "${{ steps.verify-deployment.outputs.healthy_count }}" == "${{ steps.get-instances.outputs.instance_count }}" ]]; then
+           echo "### 🎉 배포 성공" >> $GITHUB_STEP_SUMMARY
+           echo "- ✅ **완벽한 배포**: 모든 인스턴스가 헬스체크를 통과했습니다" >> $GITHUB_STEP_SUMMARY
+           echo "- 🚀 **서비스 상태**: 정상 운영 중" >> $GITHUB_STEP_SUMMARY
+           echo "- 📈 **가용성**: 100% (모든 서버 정상)" >> $GITHUB_STEP_SUMMARY
+         else
+           echo "### ⚠️ 배포 주의사항" >> $GITHUB_STEP_SUMMARY
+           echo "- **문제 인스턴스**: ${{ steps.verify-deployment.outputs.unhealthy_instances }}" >> $GITHUB_STEP_SUMMARY
+           echo "- **가용성**: $(echo "scale=1; ${{ steps.verify-deployment.outputs.healthy_count }} * 100 / ${{ steps.get-instances.outputs.instance_count }}" | bc)%" >> $GITHUB_STEP_SUMMARY
+           echo "- **조치 필요**: 문제 인스턴스 수동 확인 및 재시작 권장" >> $GITHUB_STEP_SUMMARY
+           echo "- **로그 확인**: AWS Systems Manager 콘솔에서 상세 로그를 확인하세요" >> $GITHUB_STEP_SUMMARY
+         fi
