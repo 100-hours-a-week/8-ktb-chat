@@ -4,15 +4,11 @@ name: Backend API CI/CD
 
 on:
   push:
-    branches: [ main ]
+    branches: [ dev ]
     paths:
       - 'backend/**'
       - 'scripts/**'
       - '.github/workflows/backend-cicd.yml'
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'backend/**'
 
 # 환경 변수 설정
 env:
