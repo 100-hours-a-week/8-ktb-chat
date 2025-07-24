@@ -94,98 +94,6 @@ jobs:
         echo "instance_ips=${INSTANCE_IPS}" >> $GITHUB_OUTPUT
         echo "instance_count=${INSTANCE_COUNT}" >> $GITHUB_OUTPUT
 
-    - name: 배포 스크립트 생성
-      run: |
-        echo "📝 배포 스크립트 생성 중..."
-        
-        # 배포 스크립트 생성
-        cat > deploy-script.sh << 'EOF'
-        #!/bin/bash
-        
-        # 배포 로그 설정
-        exec > >(tee /tmp/deployment.log) 2>&1
-        echo "=== 코드 배포 시작: $(date) ==="
-        
-        # 변수 설정
-        APP_DIR="/opt/ktb-chat-backend"
-        BACKUP_DIR="/opt/ktb-chat-backend-backup-$(date +%Y%m%d-%H%M%S)"
-        GITHUB_REPO="https://github.com/100-hours-a-week/8-ktb-chat.git"
-        GITHUB_BRANCH="dev"
-        
-        # 현재 실행 중인 서비스 확인
-        echo "📊 현재 서비스 상태 확인 중..."
-        sudo -u ec2-user pm2 list || echo "PM2 프로세스 없음"
-        
-        # 기존 코드 백업
-        echo "💾 기존 코드 백업 중..."
-        if [[ -d "$APP_DIR" ]]; then
-          sudo cp -r "$APP_DIR" "$BACKUP_DIR"
-          echo "✅ 백업 완료: $BACKUP_DIR"
-        fi
-        
-        # 새 코드 다운로드
-        echo "📥 새 코드 다운로드 중..."
-        cd /tmp
-        rm -rf ktb-chat-new
-        git clone -b $GITHUB_BRANCH $GITHUB_REPO ktb-chat-new
-        
-        # 기존 서비스 중지 (Graceful shutdown)
-        echo "🛑 기존 서비스 중지 중..."
-        sudo -u ec2-user pm2 stop ktb-chat-backend 2>/dev/null || true
-        
-        # 새 코드로 교체
-        echo "🔄 코드 교체 중..."
-        sudo rm -rf $APP_DIR/backend/node_modules/.cache 2>/dev/null || true
-        sudo cp -r /tmp/ktb-chat-new/backend/* $APP_DIR/backend/
-        
-        # 의존성 업데이트 (변경된 것만)
-        echo "📦 의존성 확인 및 업데이트 중..."
-        cd $APP_DIR/backend
-        sudo -u ec2-user npm ci --production --silent --prefer-offline
-        
-        # 환경변수 확인
-        echo "🔧 환경변수 확인 중..."
-        if [[ ! -f ".env" ]]; then
-          echo "❌ .env 파일이 없습니다!"
-          exit 1
-        fi
-        
-        # 서비스 재시작
-        echo "🚀 서비스 재시작 중..."
-        sudo -u ec2-user pm2 start ktb-chat-backend 2>/dev/null || \
-        sudo -u ec2-user pm2 start ecosystem.config.js
-        
-        # 서비스 상태 확인
-        echo "🔍 서비스 상태 확인 중..."
-        sleep 5
-        sudo -u ec2-user pm2 list
-        
-                 # 헬스체크
-         echo "🏥 헬스체크 중..."
-         HEALTH_SUCCESS=false
-         for i in {1..15}; do
-           if curl -f -m 10 http://localhost:5001/health >/dev/null 2>&1; then
-             echo "✅ 헬스체크 성공 (시도 $i)"
-             HEALTH_SUCCESS=true
-             break
-           fi
-           echo "헬스체크 시도 $i 실패, 재시도 중..."
-           sleep 5
-         done
-         
-         if [[ "$HEALTH_SUCCESS" != "true" ]]; then
-           echo "❌ 헬스체크 실패 - 서비스 상태 확인 필요"
-           exit 1
-         fi
-        
-        # 임시 파일 정리
-        rm -rf /tmp/ktb-chat-new
-        
-        echo "=== 코드 배포 완료: $(date) ==="
-        EOF
-        
-        chmod +x deploy-script.sh
-
     - name: 병렬 배포 실행
       id: parallel-deploy
       run: |
@@ -202,57 +110,66 @@ jobs:
         echo "📋 배포 대상: ${TOTAL_INSTANCES}개 인스턴스"
         echo "IP 목록: ${INSTANCE_IPS}"
         
-        # 병렬 배포를 위한 백그라운드 작업 배열
-        DEPLOY_PIDS=()
-        SUCCESS_COUNT=0
-        FAILED_INSTANCES=""
-        
-        # AWS Systems Manager를 통한 배포 (SSH 키 없이)
-        echo "📤 Systems Manager를 통한 배포 명령 전송..."
-        
-        COMMAND_ID=$(aws ssm send-command \
+        # 단계별 배포 명령 실행
+        echo "📤 1단계: 코드 다운로드 및 백업..."
+        COMMAND_ID_1=$(aws ssm send-command \
           --document-name "AWS-RunShellScript" \
-          --parameters 'commands=["'"$(cat deploy-script.sh | base64 -w 0)"'" | base64 -d | bash]' \
+          --parameters 'commands=["echo \"=== 코드 배포 1단계 시작 ===\"","cd /tmp && rm -rf ktb-chat-new","git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-chat-new","sudo cp -r /opt/ktb-chat-backend /opt/ktb-chat-backend-backup-$(date +%Y%m%d-%H%M%S)","echo \"✅ 1단계 완료\""]' \
           --targets "Key=tag:aws:autoscaling:groupName,Values=${{ env.ASG_NAME }}" \
           --query 'Command.CommandId' \
           --output text)
         
-        echo "✅ 배포 명령 전송됨: ${COMMAND_ID}"
+        echo "✅ 1단계 명령 전송됨: ${COMMAND_ID_1}"
         
-        # 명령 실행 상태 모니터링
-        echo "⏳ 배포 진행 상황 모니터링 중..."
+        # 1단계 완료 대기
+        echo "⏳ 1단계 완료 대기 중..."
+        aws ssm wait command-executed --command-id $COMMAND_ID_1
         
-        for i in {1..60}; do  # 최대 10분 대기
-          sleep 10
-          
-          # 명령 실행 상태 확인
-          STATUS_INFO=$(aws ssm list-command-invocations \
-            --command-id $COMMAND_ID \
-            --query 'CommandInvocations[*].{InstanceId:InstanceId,Status:Status}' \
-            --output json)
-          
-          IN_PROGRESS=$(echo "$STATUS_INFO" | jq -r '.[] | select(.Status == "InProgress") | .InstanceId' | wc -l)
-          SUCCESS=$(echo "$STATUS_INFO" | jq -r '.[] | select(.Status == "Success") | .InstanceId' | wc -l)
-          FAILED=$(echo "$STATUS_INFO" | jq -r '.[] | select(.Status == "Failed") | .InstanceId' | wc -l)
-          
-          echo "배포 상태: 성공=$SUCCESS, 실패=$FAILED, 진행중=$IN_PROGRESS"
-          
-          if [[ $IN_PROGRESS -eq 0 ]]; then
-            echo "✅ 모든 인스턴스 배포 완료"
-            break
-          fi
-        done
+        echo "📤 2단계: 서비스 중지 및 코드 교체..."
+        COMMAND_ID_2=$(aws ssm send-command \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=["echo \"=== 코드 배포 2단계 시작 ===\"","sudo -u ec2-user pm2 stop ktb-chat-backend 2>/dev/null || true","sudo rm -rf /opt/ktb-chat-backend/backend/node_modules/.cache 2>/dev/null || true","sudo cp -r /tmp/ktb-chat-new/backend/* /opt/ktb-chat-backend/backend/","cd /opt/ktb-chat-backend/backend","sudo -u ec2-user npm ci --production --silent --prefer-offline","echo \"✅ 2단계 완료\""]' \
+          --targets "Key=tag:aws:autoscaling:groupName,Values=${{ env.ASG_NAME }}" \
+          --query 'Command.CommandId' \
+          --output text)
+        
+        echo "✅ 2단계 명령 전송됨: ${COMMAND_ID_2}"
+        
+        # 2단계 완료 대기
+        echo "⏳ 2단계 완료 대기 중..."
+        aws ssm wait command-executed --command-id $COMMAND_ID_2
+        
+        echo "📤 3단계: 서비스 재시작 및 헬스체크..."
+        COMMAND_ID_3=$(aws ssm send-command \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=["echo \"=== 코드 배포 3단계 시작 ===\"","cd /opt/ktb-chat-backend/backend","sudo -u ec2-user pm2 start ktb-chat-backend 2>/dev/null || sudo -u ec2-user pm2 start ecosystem.config.js","sleep 10","for i in {1..10}; do if curl -f -m 5 http://localhost:5001/health >/dev/null 2>&1; then echo \"✅ 헬스체크 성공\" && exit 0; fi; echo \"헬스체크 시도 $i 실패\" && sleep 3; done","echo \"❌ 헬스체크 실패\" && exit 1"]' \
+          --targets "Key=tag:aws:autoscaling:groupName,Values=${{ env.ASG_NAME }}" \
+          --query 'Command.CommandId' \
+          --output text)
+        
+        echo "✅ 3단계 명령 전송됨: ${COMMAND_ID_3}"
+        
+        # 3단계 완료 대기
+        echo "⏳ 3단계 완료 대기 중..."
+        aws ssm wait command-executed --command-id $COMMAND_ID_3
         
         # 최종 결과 확인
         echo "📊 최종 배포 결과:"
-        aws ssm list-command-invocations \
-          --command-id $COMMAND_ID \
-          --query 'CommandInvocations[*].{InstanceId:InstanceId,Status:Status}' \
-          --output table
+        SUCCESS_COUNT=$(aws ssm list-command-invocations \
+          --command-id $COMMAND_ID_3 \
+          --query 'CommandInvocations[?Status==`Success`] | length(@)' \
+          --output text)
         
-        echo "command_id=${COMMAND_ID}" >> $GITHUB_OUTPUT
-        echo "success_count=${SUCCESS}" >> $GITHUB_OUTPUT
-        echo "failed_count=${FAILED}" >> $GITHUB_OUTPUT
+        FAILED_COUNT=$(aws ssm list-command-invocations \
+          --command-id $COMMAND_ID_3 \
+          --query 'CommandInvocations[?Status==`Failed`] | length(@)' \
+          --output text)
+        
+        echo "성공: ${SUCCESS_COUNT}, 실패: ${FAILED_COUNT}"
+        
+        echo "command_id_final=${COMMAND_ID_3}" >> $GITHUB_OUTPUT
+        echo "success_count=${SUCCESS_COUNT}" >> $GITHUB_OUTPUT
+        echo "failed_count=${FAILED_COUNT}" >> $GITHUB_OUTPUT
 
     - name: 배포 후 검증
       id: verify-deployment
@@ -263,58 +180,58 @@ jobs:
         HEALTHY_COUNT=0
         UNHEALTHY_INSTANCES=""
         
-                 for IP in $INSTANCE_IPS; do
-           echo "인스턴스 ${IP} 헬스체크 중..."
-           
-           # 최대 60초간 헬스체크 시도 (배포 후 서비스 시작 시간 고려)
-           HEALTHY=false
-           for i in {1..12}; do
-             echo "  시도 ${i}/12: ${IP}:${{ env.BACKEND_PORT }}${{ env.HEALTH_CHECK_PATH }}"
-             
-             # 헬스체크 API 호출
-             if curl -f -m 10 "http://${IP}:${{ env.BACKEND_PORT }}${{ env.HEALTH_CHECK_PATH }}" >/dev/null 2>&1; then
-               echo "✅ ${IP} 헬스체크 성공"
-               HEALTHY=true
-               break
-             fi
-             
-             # 마지막 시도가 아니면 대기
-             if [[ $i -lt 12 ]]; then
-               echo "  ${IP} 응답 대기 중... (5초 후 재시도)"
-               sleep 5
-             fi
-           done
-           
-           if [[ "$HEALTHY" == "true" ]]; then
-             HEALTHY_COUNT=$((HEALTHY_COUNT + 1))
-           else
-             echo "❌ ${IP} 헬스체크 실패 - 서비스가 정상적으로 시작되지 않았습니다"
-             UNHEALTHY_INSTANCES="${UNHEALTHY_INSTANCES}${IP} "
-           fi
-         done
+        for IP in $INSTANCE_IPS; do
+          echo "인스턴스 ${IP} 헬스체크 중..."
+          
+          # 최대 60초간 헬스체크 시도 (배포 후 서비스 시작 시간 고려)
+          HEALTHY=false
+          for i in {1..12}; do
+            echo "  시도 ${i}/12: ${IP}:${{ env.BACKEND_PORT }}${{ env.HEALTH_CHECK_PATH }}"
+            
+            # 헬스체크 API 호출
+            if curl -f -m 10 "http://${IP}:${{ env.BACKEND_PORT }}${{ env.HEALTH_CHECK_PATH }}" >/dev/null 2>&1; then
+              echo "✅ ${IP} 헬스체크 성공"
+              HEALTHY=true
+              break
+            fi
+            
+            # 마지막 시도가 아니면 대기
+            if [[ $i -lt 12 ]]; then
+              echo "  ${IP} 응답 대기 중... (5초 후 재시도)"
+              sleep 5
+            fi
+          done
+          
+          if [[ "$HEALTHY" == "true" ]]; then
+            HEALTHY_COUNT=$((HEALTHY_COUNT + 1))
+          else
+            echo "❌ ${IP} 헬스체크 실패 - 서비스가 정상적으로 시작되지 않았습니다"
+            UNHEALTHY_INSTANCES="${UNHEALTHY_INSTANCES}${IP} "
+          fi
+        done
         
-                 echo "📊 최종 헬스체크 결과: ${HEALTHY_COUNT}/${{ steps.get-instances.outputs.instance_count }} 성공"
-         
-         if [[ $HEALTHY_COUNT -eq ${{ steps.get-instances.outputs.instance_count }} ]]; then
-           echo "🎉 모든 인스턴스가 정상 상태입니다!"
-           echo "✅ 배포 성공: 모든 서비스가 헬스체크를 통과했습니다"
-         else
-           echo "⚠️ 일부 인스턴스에서 문제가 발생했습니다"
-           echo "문제 인스턴스: ${UNHEALTHY_INSTANCES}"
-           echo "❌ 배포 부분 실패: ${HEALTHY_COUNT}/${{ steps.get-instances.outputs.instance_count }} 인스턴스만 정상"
-           
-           # 헬스체크 실패한 인스턴스가 50% 이상이면 배포 실패로 처리
-           TOTAL_INSTANCES=${{ steps.get-instances.outputs.instance_count }}
-           FAILURE_THRESHOLD=$((TOTAL_INSTANCES / 2))
-           
-           if [[ $HEALTHY_COUNT -le $FAILURE_THRESHOLD ]]; then
-             echo "💥 심각한 배포 실패: 50% 이상의 인스턴스가 실패했습니다"
-             exit 1
-           fi
-         fi
-         
-         echo "healthy_count=${HEALTHY_COUNT}" >> $GITHUB_OUTPUT
-         echo "unhealthy_instances=${UNHEALTHY_INSTANCES}" >> $GITHUB_OUTPUT
+        echo "📊 최종 헬스체크 결과: ${HEALTHY_COUNT}/${{ steps.get-instances.outputs.instance_count }} 성공"
+        
+        if [[ $HEALTHY_COUNT -eq ${{ steps.get-instances.outputs.instance_count }} ]]; then
+          echo "🎉 모든 인스턴스가 정상 상태입니다!"
+          echo "✅ 배포 성공: 모든 서비스가 헬스체크를 통과했습니다"
+        else
+          echo "⚠️ 일부 인스턴스에서 문제가 발생했습니다"
+          echo "문제 인스턴스: ${UNHEALTHY_INSTANCES}"
+          echo "❌ 배포 부분 실패: ${HEALTHY_COUNT}/${{ steps.get-instances.outputs.instance_count }} 인스턴스만 정상"
+          
+          # 헬스체크 실패한 인스턴스가 50% 이상이면 배포 실패로 처리
+          TOTAL_INSTANCES=${{ steps.get-instances.outputs.instance_count }}
+          FAILURE_THRESHOLD=$((TOTAL_INSTANCES / 2))
+          
+          if [[ $HEALTHY_COUNT -le $FAILURE_THRESHOLD ]]; then
+            echo "💥 심각한 배포 실패: 50% 이상의 인스턴스가 실패했습니다"
+            exit 1
+          fi
+        fi
+        
+        echo "healthy_count=${HEALTHY_COUNT}" >> $GITHUB_OUTPUT
+        echo "unhealthy_instances=${UNHEALTHY_INSTANCES}" >> $GITHUB_OUTPUT
 
     - name: 배포 결과 요약
       if: always()
@@ -330,13 +247,13 @@ jobs:
         echo "### 🎯 배포 대상" >> $GITHUB_STEP_SUMMARY
         echo "- **ASG**: \`${{ env.ASG_NAME }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **대상 인스턴스**: ${{ steps.get-instances.outputs.instance_count }}개" >> $GITHUB_STEP_SUMMARY
-        echo "- **배포 명령 ID**: \`${{ steps.parallel-deploy.outputs.command_id }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **최종 명령 ID**: \`${{ steps.parallel-deploy.outputs.command_id_final }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-                 echo "### 📊 배포 결과" >> $GITHUB_STEP_SUMMARY
-         echo "- **코드 배포 성공**: ${{ steps.parallel-deploy.outputs.success_count }}개" >> $GITHUB_STEP_SUMMARY
-         echo "- **코드 배포 실패**: ${{ steps.parallel-deploy.outputs.failed_count }}개" >> $GITHUB_STEP_SUMMARY
-         echo "- **헬스체크 통과**: ${{ steps.verify-deployment.outputs.healthy_count }}개" >> $GITHUB_STEP_SUMMARY
-         echo "- **헬스체크 실패**: $((${{ steps.get-instances.outputs.instance_count }} - ${{ steps.verify-deployment.outputs.healthy_count }}))개" >> $GITHUB_STEP_SUMMARY
+        echo "### 📊 배포 결과" >> $GITHUB_STEP_SUMMARY
+        echo "- **코드 배포 성공**: ${{ steps.parallel-deploy.outputs.success_count }}개" >> $GITHUB_STEP_SUMMARY
+        echo "- **코드 배포 실패**: ${{ steps.parallel-deploy.outputs.failed_count }}개" >> $GITHUB_STEP_SUMMARY
+        echo "- **헬스체크 통과**: ${{ steps.verify-deployment.outputs.healthy_count }}개" >> $GITHUB_STEP_SUMMARY
+        echo "- **헬스체크 실패**: $((${{ steps.get-instances.outputs.instance_count }} - ${{ steps.verify-deployment.outputs.healthy_count }}))개" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### ⚡ 성능 개선" >> $GITHUB_STEP_SUMMARY
         echo "- **인스턴스 재시작**: ❌ 없음 (기존 인스턴스 유지)" >> $GITHUB_STEP_SUMMARY
@@ -345,16 +262,16 @@ jobs:
         echo "- **병렬 처리**: ✅ 모든 인스턴스 동시 배포" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-                 # 배포 상태에 따른 상세 정보 추가
-         if [[ "${{ steps.verify-deployment.outputs.healthy_count }}" == "${{ steps.get-instances.outputs.instance_count }}" ]]; then
-           echo "### 🎉 배포 성공" >> $GITHUB_STEP_SUMMARY
-           echo "- ✅ **완벽한 배포**: 모든 인스턴스가 헬스체크를 통과했습니다" >> $GITHUB_STEP_SUMMARY
-           echo "- 🚀 **서비스 상태**: 정상 운영 중" >> $GITHUB_STEP_SUMMARY
-           echo "- 📈 **가용성**: 100% (모든 서버 정상)" >> $GITHUB_STEP_SUMMARY
-         else
-           echo "### ⚠️ 배포 주의사항" >> $GITHUB_STEP_SUMMARY
-           echo "- **문제 인스턴스**: ${{ steps.verify-deployment.outputs.unhealthy_instances }}" >> $GITHUB_STEP_SUMMARY
-           echo "- **가용성**: $(echo "scale=1; ${{ steps.verify-deployment.outputs.healthy_count }} * 100 / ${{ steps.get-instances.outputs.instance_count }}" | bc)%" >> $GITHUB_STEP_SUMMARY
-           echo "- **조치 필요**: 문제 인스턴스 수동 확인 및 재시작 권장" >> $GITHUB_STEP_SUMMARY
-           echo "- **로그 확인**: AWS Systems Manager 콘솔에서 상세 로그를 확인하세요" >> $GITHUB_STEP_SUMMARY
-         fi
+        # 배포 상태에 따른 상세 정보 추가
+        if [[ "${{ steps.verify-deployment.outputs.healthy_count }}" == "${{ steps.get-instances.outputs.instance_count }}" ]]; then
+          echo "### 🎉 배포 성공" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ **완벽한 배포**: 모든 인스턴스가 헬스체크를 통과했습니다" >> $GITHUB_STEP_SUMMARY
+          echo "- 🚀 **서비스 상태**: 정상 운영 중" >> $GITHUB_STEP_SUMMARY
+          echo "- 📈 **가용성**: 100% (모든 서버 정상)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### ⚠️ 배포 주의사항" >> $GITHUB_STEP_SUMMARY
+          echo "- **문제 인스턴스**: ${{ steps.verify-deployment.outputs.unhealthy_instances }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **가용성**: $(echo "scale=1; ${{ steps.verify-deployment.outputs.healthy_count }} * 100 / ${{ steps.get-instances.outputs.instance_count }}" | bc)%" >> $GITHUB_STEP_SUMMARY
+          echo "- **조치 필요**: 문제 인스턴스 수동 확인 및 재시작 권장" >> $GITHUB_STEP_SUMMARY
+          echo "- **로그 확인**: AWS Systems Manager 콘솔에서 상세 로그를 확인하세요" >> $GITHUB_STEP_SUMMARY
+        fi
