@@ -74,7 +74,7 @@ router.get('/health', async (req, res) => {
 });
 
 // 채팅방 목록 조회 (페이징 적용)
-router.get('/', [limiter, auth], async (req, res) => {
+router.get('/', [auth, limiter], async (req, res) => {
   try {
     // 쿼리 파라미터 처리
     const page = Math.max(0, parseInt(req.query.page) || 0);
@@ -107,34 +107,12 @@ router.get('/', [limiter, auth], async (req, res) => {
     const totalCount = await Room.countDocuments(filter);
     const skip = page * pageSize;
 
-    const rooms = await Room.aggregate([
-      { $match: filter },
-      { $sort: { [sortField]: sortOrder === 'desc' ? -1 : 1 } },
-      { $skip: skip },
-      { $limit: pageSize },
-      { $addFields: { participantsCount: { $size: { $ifNull: ['$participants', []] } } } },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'creator',
-          foreignField: '_id',
-          as: 'creatorInfo'
-        }
-      },
-      { $unwind: { path: '$creatorInfo', preserveNullAndEmptyArrays: true } },
-      {
-        $project: {
-          _id: 1,
-          name: 1,
-          hasPassword: 1,
-          'creator._id': '$creatorInfo._id',
-          'creator.name': '$creatorInfo.name',
-          'creator.email': '$creatorInfo.email',
-          participantsCount: 1,
-          createdAt: 1
-        }
-      }
-    ]);
+    const rooms = await Room.find(filter)
+      .sort({ [sortField]: sortOrder === 'desc' ? -1 : 1 })
+      .skip(skip)
+      .limit(pageSize)
+      .populate('creator', 'name email')
+      .lean();
 
     const safeRooms = rooms.map(room => ({
       _id: room._id?.toString() || 'unknown',
@@ -224,9 +202,12 @@ router.post('/', auth, async (req, res) => {
       });
     }
     
-    // 방 생성 후 캐시 삭제 (대표 키만 예시, 실제로는 여러 키 삭제 필요)
+    // 방 생성 후 캐시 삭제
     try {
-      await redisClient.del('chat:rooms:list:page=0:size=10:sort=createdAt:desc:search=');
+      const keys = await redisClient.keys('chat:rooms:list:*'); // 키 패턴 조회
+      if (keys.length > 0) {
+        await redisClient.del(keys); // 관련 키 삭제
+      }
     } catch (e) {
       console.error('Redis del error:', e);
     }
