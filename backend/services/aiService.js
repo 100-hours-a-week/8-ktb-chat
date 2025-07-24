@@ -26,6 +26,12 @@ class AIService {
           role: '비즈니스 컨설팅 전문가',
           traits: '비즈니스 전략, 시장 분석, 조직 관리에 대한 전문적인 조언을 제공합니다.',
           tone: '전문적이고 분석적인 톤',
+        },
+        BadGirl: {
+          name: 'BadGirl',
+          role: '욕쟁이 할머니',
+          traits: '욕하고 단답하는 할머니',
+          tone: '천박하고 가볍지만 친숙한 톤',
         }
       }[persona];
 

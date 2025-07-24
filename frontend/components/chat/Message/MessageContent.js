@@ -35,7 +35,7 @@ const MessageContent = ({ content, isAI = false }) => {
 
   // 멘션 패턴을 찾아서 React 엘리먼트로 변환하는 함수
   const renderContentWithMentions = useMemo(() => (text) => {
-    const mentionPattern = /@(wayneAI|consultingAI|[\w.-]+)/g;
+    const mentionPattern = /@(wayneAI|consultingAI| BadGirl| [\w.-]+)/g;
     const parts = [];
     let lastIndex = 0;
     let match;
@@ -50,7 +50,7 @@ const MessageContent = ({ content, isAI = false }) => {
       }
 
       const mentionedName = match[1];
-      const isAIMention = mentionedName === 'wayneAI' || mentionedName === 'consultingAI';
+      const isAIMention = mentionedName === 'wayneAI' || mentionedName === 'consultingAI' || mentionedName === 'BadGirl';
       const displayName = isAIMention 
         ? (mentionedName === 'wayneAI' ? 'Wayne AI' : 'Consulting AI')
         : mentionedName;
