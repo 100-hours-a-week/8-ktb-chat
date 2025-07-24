@@ -99,23 +99,42 @@ jobs:
         COMMA_SEPARATED_IPS=$(echo $INSTANCE_IPS | tr ' ' ',' | sed 's/,$//')
         echo "instance_ips_comma=${COMMA_SEPARATED_IPS}" >> $GITHUB_OUTPUT
 
-    - name: 🚀 EC2에 완전 자동 배포 실행 (SSM)
-      run: |
-        echo "🚀 간단한 배포 스크립트 실행..."
-        
-        # 각 인스턴스에 명령 실행
-        for INSTANCE_ID in ${{ steps.get-instances.outputs.instance_ids }}; do
-          echo "📡 인스턴스 ${INSTANCE_ID}에 배포 중..."
+    - name: 🚀 EC2에 SSH 자동 배포 실행
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ steps.get-instances.outputs.instance_ips_comma }}
+        username: ec2-user
+        key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+        script: |
+          #!/bin/bash
+          set -e
           
-          aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["sudo swapoff -a","cd /tmp && rm -rf ktb-new","git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new","echo \"${{ secrets.ENV_BACKEND_DEV }}\" > /tmp/ktb-new/backend/.env","sudo -u ec2-user pm2 delete all || true","sudo mkdir -p /opt/ktb-chat-backend","sudo cp -r ktb-new/backend /opt/ktb-chat-backend/","sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend","cd /opt/ktb-chat-backend/backend && sudo -u ec2-user npm ci --production","sudo -u ec2-user pm2 start server.js --name ktb-backend-cluster --instances 2 --exec-mode cluster --max-memory-restart 700M --node-args=--max-old-space-size=600","sudo -u ec2-user pm2 save","sudo -u ec2-user pm2 list"]' \
-            --timeout-seconds 600 \
-            --region ${{ env.AWS_REGION }}
-        done
-        
-        echo "✅ 모든 인스턴스에 배포 명령 전송 완료"
+          echo "🚀 자동 배포 시작..."
+          sudo swapoff -a
+          cd /tmp && rm -rf ktb-new
+          git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new
+          
+          # .env 파일을 다운받은 코드 폴더에 직접 생성
+          cat << 'EOF' > /tmp/ktb-new/backend/.env
+          ${{ secrets.ENV_BACKEND_DEV }}
+          EOF
+          
+          sudo -u ec2-user pm2 delete all || true
+          sudo mkdir -p /opt/ktb-chat-backend
+          sudo cp -r ktb-new/backend /opt/ktb-chat-backend/
+          sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend
+          cd /opt/ktb-chat-backend/backend
+          sudo -u ec2-user npm ci --production
+          sudo -u ec2-user pm2 start server.js \
+            --name 'ktb-backend-cluster' \
+            --instances 2 \
+            --exec-mode cluster \
+            --max-memory-restart 700M \
+            --node-args='--max-old-space-size=600'
+          sudo -u ec2-user pm2 save
+          sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user
+          sleep 5 && sudo -u ec2-user pm2 list
+          echo "✅ 배포 완료!"
 
     - name: ALB Target Group 헬스체크
       id: verify-deployment
