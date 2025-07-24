@@ -4,13 +4,13 @@ name: Backend API CI/CD
 
 on:
   push:
-    branches: [ main, dev, jacky ]
+    branches: [ main ]
     paths:
       - 'backend/**'
       - 'scripts/**'
       - '.github/workflows/backend-cicd.yml'
   pull_request:
-    branches: [ main, dev, jacky ]
+    branches: [ main ]
     paths:
       - 'backend/**'
 
