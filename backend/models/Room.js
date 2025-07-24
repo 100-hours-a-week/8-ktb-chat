@@ -27,7 +27,13 @@ const RoomSchema = new mongoose.Schema({
   participants: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
-  }]
+  }],
+  // 각 유저별 마지막 읽은 시각 (read cursor)
+  lastReadAtPerUser: {
+    type: Map,
+    of: Date,
+    default: new Map()
+  }
 });
 
 // 비밀번호 해싱 미들웨어
@@ -49,5 +55,9 @@ RoomSchema.methods.checkPassword = async function(password) {
   const room = await this.constructor.findById(this._id).select('+password');
   return await bcrypt.compare(password, room.password);
 };
+
+RoomSchema.index({ createdAt: -1 });
+RoomSchema.index({ name: 1 });
+RoomSchema.index({ participants: 1 });
 
 module.exports = mongoose.model('Room', RoomSchema);
