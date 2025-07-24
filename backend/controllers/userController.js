@@ -3,6 +3,7 @@ const User = require('../models/User');
 const { upload } = require('../middleware/upload');
 const path = require('path');
 const fs = require('fs').promises;
+const CacheService = require('../services/cacheService');
 
 // 회원가입
 exports.register = async (req, res) => {
@@ -96,11 +97,27 @@ exports.register = async (req, res) => {
   }
 };
 
-// 프로필 조회
+// 프로필 조회 (캐시 적용)
 exports.getProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password');
-    if (!user) {
+    // 캐시된 사용자 프로필 조회
+    const userProfile = await CacheService.getUserProfile(req.user.id, async () => {
+      const user = await User.findById(req.user.id).select('-password');
+      if (!user) {
+        return null;
+      }
+
+      return {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        profileImage: user.profileImage,
+        lastActive: user.lastActive,
+        createdAt: user.createdAt
+      };
+    });
+
+    if (!userProfile) {
       return res.status(404).json({
         success: false,
         message: '사용자를 찾을 수 없습니다.'
@@ -109,12 +126,7 @@ exports.getProfile = async (req, res) => {
 
     res.json({
       success: true,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        profileImage: user.profileImage
-      }
+      user: userProfile
     });
 
   } catch (error) {
@@ -155,6 +167,9 @@ exports.updateProfile = async (req, res) => {
     }
 
     await user.save();
+
+    // 사용자 캐시 무효화
+    await CacheService.invalidateByTag(`user:${user._id}`);
 
     res.json({
       success: true,
@@ -234,6 +249,9 @@ exports.uploadProfileImage = async (req, res) => {
     const imageUrl = `/uploads/${req.file.filename}`;
     user.profileImage = imageUrl;
     await user.save();
+
+    // 사용자 캐시 무효화
+    await CacheService.invalidateByTag(`user:${user._id}`);
 
     res.json({
       success: true,

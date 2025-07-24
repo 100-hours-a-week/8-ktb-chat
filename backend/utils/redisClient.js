@@ -52,6 +52,12 @@ class MockRedisClient {
     return 0;
   }
 
+  async keys(pattern) {
+    const allKeys = Array.from(this.store.keys());
+    const regex = new RegExp(pattern.replace(/\*/g, '.*'));
+    return allKeys.filter(key => regex.test(key));
+  }
+
   async quit() {
     this.store.clear();
     console.log('Mock Redis connection closed');
@@ -230,6 +236,26 @@ class RedisClient {
     } catch (error) {
       console.error('Redis expire error:', error);
       throw error;
+    }
+  }
+
+  async keys(pattern) {
+    try {
+      if (!this.isConnected) {
+        await this.connect();
+      }
+
+      if (this.useMock) {
+        // Mock 클라이언트에서 패턴 매칭
+        const allKeys = Array.from(this.client.store.keys());
+        const regex = new RegExp(pattern.replace(/\*/g, '.*'));
+        return allKeys.filter(key => regex.test(key));
+      }
+
+      return await this.client.keys(pattern);
+    } catch (error) {
+      console.error('Redis keys error:', error);
+      return [];
     }
   }
 

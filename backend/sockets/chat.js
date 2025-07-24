@@ -7,6 +7,7 @@ const { jwtSecret } = require('../config/keys');
 const redisClient = require('../utils/redisClient');
 const SessionService = require('../services/sessionService');
 const aiService = require('../services/aiService');
+const CacheService = require('../services/cacheService');
 
 module.exports = function(io) {
   const connectedUsers = new Map();
@@ -29,45 +30,54 @@ module.exports = function(io) {
     });
   };
 
-  // 메시지 일괄 로드 함수 개선
+  // 캐시된 메시지 일괄 로드 함수 (대폭 개선)
   const loadMessages = async (socket, roomId, before, limit = BATCH_SIZE) => {
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => {
-        reject(new Error('Message loading timed out'));
-      }, MESSAGE_LOAD_TIMEOUT);
-    });
-
     try {
-      // 쿼리 구성
-      const query = { room: roomId };
-      if (before) {
-        query.timestamp = { $lt: new Date(before) };
-      }
+      // 캐시 서비스를 사용한 메시지 조회
+      const result = await CacheService.getMessages(roomId, before, limit, async () => {
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => {
+            reject(new Error('Message loading timed out'));
+          }, MESSAGE_LOAD_TIMEOUT);
+        });
 
-      // 메시지 로드 with profileImage
-      const messages = await Promise.race([
-        Message.find(query)
-          .populate('sender', 'name email profileImage')
-          .populate({
-            path: 'file',
-            select: 'filename originalname mimetype size'
-          })
-          .sort({ timestamp: -1 })
-          .limit(limit + 1)
-          .lean(),
-        timeoutPromise
-      ]);
+        // 쿼리 구성
+        const query = { room: roomId, isDeleted: false };
+        if (before) {
+          query.timestamp = { $lt: new Date(before) };
+        }
 
-      // 결과 처리
-      const hasMore = messages.length > limit;
-      const resultMessages = messages.slice(0, limit);
-      const sortedMessages = resultMessages.sort((a, b) => 
-        new Date(a.timestamp) - new Date(b.timestamp)
-      );
+        // 메시지 로드 with profileImage (캐시 미스 시에만 실행)
+        const messages = await Promise.race([
+          Message.find(query)
+            .populate('sender', 'name email profileImage')
+            .populate({
+              path: 'file',
+              select: 'filename originalname mimetype size'
+            })
+            .sort({ timestamp: -1 })
+            .limit(limit + 1)
+            .lean(),
+          timeoutPromise
+        ]);
 
-      // 읽음 상태 비동기 업데이트
-      if (sortedMessages.length > 0 && socket.user) {
-        const messageIds = sortedMessages.map(msg => msg._id);
+        // 결과 처리
+        const hasMore = messages.length > limit;
+        const resultMessages = messages.slice(0, limit);
+        const sortedMessages = resultMessages.sort((a, b) => 
+          new Date(a.timestamp) - new Date(b.timestamp)
+        );
+
+        return {
+          messages: sortedMessages,
+          hasMore,
+          oldestTimestamp: sortedMessages[0]?.timestamp || null
+        };
+      });
+
+      // 읽음 상태 비동기 업데이트 (캐시와 별개로 항상 실행)
+      if (result?.messages?.length > 0 && socket.user) {
+        const messageIds = result.messages.map(msg => msg._id);
         Message.updateMany(
           {
             _id: { $in: messageIds },
@@ -86,11 +96,7 @@ module.exports = function(io) {
         });
       }
 
-      return {
-        messages: sortedMessages,
-        hasMore,
-        oldestTimestamp: sortedMessages[0]?.timestamp || null
-      };
+      return result;
     } catch (error) {
       if (error.message === 'Message loading timed out') {
         logDebug('message load timeout', {
@@ -608,6 +614,9 @@ module.exports = function(io) {
           { path: 'sender', select: 'name email profileImage' },
           { path: 'file', select: 'filename originalname mimetype size' }
         ]);
+
+        // 새 메시지 작성 시 해당 채팅방의 메시지 캐시 무효화
+        await CacheService.invalidateByTag(`room:${room}`);
 
         io.to(room).emit('message', message);
 
