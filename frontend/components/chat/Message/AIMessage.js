@@ -27,9 +27,21 @@ const AIMessage = ({
 
   // AI 사용자 정보 생성
   const aiUser = {
-    name: msg.aiType === 'wayneAI' ? 'Wayne AI' : 'Consulting AI',
-    email: msg.aiType === 'wayneAI' ? 'ai@wayne.ai' : 'ai@consulting.ai',
-    avatarInitial: msg.aiType === 'wayneAI' ? 'W' : 'C'
+    name: msg.aiType === 'wayneAI'
+    ? 'Wayne AI'
+    : msg.aiType === 'BadGirl'
+      ? '욕쟁이 할머니'
+      : 'Consulting AI',
+    email: msg.aiType === 'wayneAI'
+    ? 'ai@wayne.ai'
+    : msg.aiType === 'BadGirl'
+      ? 'ai@BadGirl.ai'
+      : 'ai@consulting.ai',
+    avatarInitial: msg.aiType === 'wayneAI'
+    ? 'W'
+    : msg.aiType === 'BadGirl'
+      ? '욕'
+      : 'C',
   };
 
   const renderContent = () => {
