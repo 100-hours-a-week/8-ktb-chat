@@ -111,17 +111,16 @@ jobs:
           
           echo "🚀 자동 배포 시작..."
           
-          # Node.js 및 PM2 설치 확인 및 설치
-          if ! command -v node &> /dev/null; then
-            echo "📦 Node.js 설치 중..."
-            curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
-            sudo yum install -y nodejs
-          fi
+          # Node.js 및 PM2 강제 설치 (경로 문제 해결)
+          echo "📦 Node.js 설치 중..."
+          curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash - || true
+          sudo yum install -y nodejs || true
           
-          if ! command -v pm2 &> /dev/null; then
-            echo "📦 PM2 설치 중..."
-            sudo npm install -g pm2
-          fi
+          echo "📦 PM2 설치 중..."
+          sudo npm install -g pm2 || true
+          
+          # PATH 환경변수 갱신
+          export PATH=$PATH:/usr/bin:/usr/local/bin
           
           echo "✅ 환경 설정 완료"
           
