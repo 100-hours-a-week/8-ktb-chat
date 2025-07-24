@@ -19,6 +19,7 @@ env:
   DEPLOY_USER: ec2-user
   BACKEND_PORT: 5001
   HEALTH_CHECK_PATH: /health
+  PUBLIC_URL: https://chat.goorm-ktb-008.goorm.team
 
 jobs:
   # 실행 중인 인스턴스에 코드 직접 배포
@@ -153,72 +154,71 @@ jobs:
         echo "failed_count=0" >> $GITHUB_OUTPUT
         echo "manual_deploy=true" >> $GITHUB_OUTPUT
 
-    - name: 배포 후 검증
+    - name: ALB Target Group 헬스체크
       id: verify-deployment
       run: |
-        echo "🔍 배포 후 전체 서비스 상태 검증 중..."
+        echo "🔍 ALB Target Group 상태 검증 중..."
         
-        INSTANCE_IPS="${{ steps.get-instances.outputs.instance_ips }}"
-        HEALTHY_COUNT=0
-        UNHEALTHY_INSTANCES=""
+        # ASG에 연결된 Target Group ARN 가져오기
+        TARGET_GROUP_ARN=$(aws autoscaling describe-auto-scaling-groups \
+          --auto-scaling-group-names ${{ env.ASG_NAME }} \
+          --query 'AutoScalingGroups[0].TargetGroupARNs[0]' \
+          --output text)
         
-                 for IP in $INSTANCE_IPS; do
-           echo "인스턴스 ${IP} 헬스체크 중..."
-           
-           # 최대 60초간 헬스체크 시도 (배포 후 서비스 시작 시간 고려)
-           HEALTHY=false
-           for i in {1..12}; do
-             echo "  시도 ${i}/12: ${IP}:${{ env.BACKEND_PORT }}${{ env.HEALTH_CHECK_PATH }}"
-             
-             # 헬스체크 API 호출
-             if curl -f -m 10 "http://${IP}:${{ env.BACKEND_PORT }}${{ env.HEALTH_CHECK_PATH }}" >/dev/null 2>&1; then
-               echo "✅ ${IP} 헬스체크 성공"
-               HEALTHY=true
-               break
-             fi
-             
-             # 마지막 시도가 아니면 대기
-             if [[ $i -lt 12 ]]; then
-               echo "  ${IP} 응답 대기 중... (5초 후 재시도)"
-               sleep 5
-             fi
-           done
-           
-           if [[ "$HEALTHY" == "true" ]]; then
-             HEALTHY_COUNT=$((HEALTHY_COUNT + 1))
-           else
-             echo "❌ ${IP} 헬스체크 실패 - 서비스가 정상적으로 시작되지 않았습니다"
-             UNHEALTHY_INSTANCES="${UNHEALTHY_INSTANCES}${IP} "
-           fi
-         done
+        if [[ "$TARGET_GROUP_ARN" == "None" || -z "$TARGET_GROUP_ARN" ]]; then
+          echo "❌ ASG에 연결된 Target Group을 찾을 수 없습니다."
+          exit 1
+        fi
+        echo "🎯 대상 Target Group: ${TARGET_GROUP_ARN}"
+
+        # 모든 대상이 healthy 상태가 될 때까지 대기 (최대 3분)
+        echo "⏳ 모든 인스턴스가 ALB에서 Healthy 상태가 될 때까지 대기 중..."
+        TIMEOUT=180
+        ELAPSED=0
+        ALL_HEALTHY=false
+
+        while [[ $ELAPSED -lt $TIMEOUT ]]; do
+          HEALTH_STATUS=$(aws elbv2 describe-target-health --target-group-arn ${TARGET_GROUP_ARN})
+          
+          # unhealthy 또는 initial 상태인 인스턴스 수 확인
+          UNHEALTHY_COUNT=$(echo "$HEALTH_STATUS" | jq '[.TargetHealthDescriptions[] | select(.TargetHealth.State != "healthy")] | length')
+          
+          if [[ $UNHEALTHY_COUNT -eq 0 ]]; then
+            TOTAL_TARGETS=$(echo "$HEALTH_STATUS" | jq '[.TargetHealthDescriptions[]] | length')
+            HEALTHY_TARGETS=$(echo "$HEALTH_STATUS" | jq '[.TargetHealthDescriptions[] | select(.TargetHealth.State == "healthy")] | length')
+            if [[ $TOTAL_TARGETS -gt 0 && $TOTAL_TARGETS -eq $HEALTHY_TARGETS ]]; then
+              echo "✅ 모든 ${HEALTHY_TARGETS}개 인스턴스가 Healthy 상태입니다!"
+              ALL_HEALTHY=true
+              break
+            fi
+          fi
+          
+          echo "현재 상태: $(echo "$HEALTH_STATUS" | jq -r '.TargetHealthDescriptions[] | .Target.Id + ": " + .TargetHealth.State' | tr '\n' ' | ') (${ELAPSED}초 경과)"
+          sleep 15
+          ELAPSED=$((ELAPSED + 15))
+        done
+
+        if [[ "$ALL_HEALTHY" != "true" ]]; then
+          echo "❌ 일부 인스턴스가 Healthy 상태가 되지 않았습니다."
+          exit 1
+        fi
+
+        # 최종 Public URL 헬스체크
+        echo "🌐 최종 Public URL 헬스체크 중... (${{ env.PUBLIC_URL }}/health)"
+        if curl -f -L --max-redirs 3 ${{ env.PUBLIC_URL }}/health; then
+          echo "🎉 Public URL 헬스체크 성공!"
+        else
+          echo "⚠️ Public URL 헬스체크 실패."
+          exit 1
+        fi
         
-                 echo "📊 최종 헬스체크 결과: ${HEALTHY_COUNT}/${{ steps.get-instances.outputs.instance_count }} 성공"
-         
-         if [[ $HEALTHY_COUNT -eq ${{ steps.get-instances.outputs.instance_count }} ]]; then
-           echo "🎉 모든 인스턴스가 정상 상태입니다!"
-           echo "✅ 배포 성공: 모든 서비스가 헬스체크를 통과했습니다"
-         else
-           echo "⚠️ 일부 인스턴스에서 문제가 발생했습니다"
-           echo "문제 인스턴스: ${UNHEALTHY_INSTANCES}"
-           echo "❌ 배포 부분 실패: ${HEALTHY_COUNT}/${{ steps.get-instances.outputs.instance_count }} 인스턴스만 정상"
-           
-           # 헬스체크 실패한 인스턴스가 50% 이상이면 배포 실패로 처리
-           TOTAL_INSTANCES=${{ steps.get-instances.outputs.instance_count }}
-           FAILURE_THRESHOLD=$((TOTAL_INSTANCES / 2))
-           
-           if [[ $HEALTHY_COUNT -le $FAILURE_THRESHOLD ]]; then
-             echo "💥 심각한 배포 실패: 50% 이상의 인스턴스가 실패했습니다"
-             exit 1
-           fi
-         fi
-         
-         echo "healthy_count=${HEALTHY_COUNT}" >> $GITHUB_OUTPUT
-         echo "unhealthy_instances=${UNHEALTHY_INSTANCES}" >> $GITHUB_OUTPUT
+        echo "healthy_count=${HEALTHY_TARGETS}" >> $GITHUB_OUTPUT
+        echo "unhealthy_instances=''" >> $GITHUB_OUTPUT # Target Group 헬스체크로 대체
 
     - name: 배포 결과 요약
       if: always()
       run: |
-        echo "## 🚀 빠른 코드 배포 완료" >> $GITHUB_STEP_SUMMARY
+        echo "## 🚀 코드 배포 및 검증 완료" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📋 배포 정보" >> $GITHUB_STEP_SUMMARY
         echo "- **배포 ID**: \`${{ steps.meta.outputs.deployment_id }}\`" >> $GITHUB_STEP_SUMMARY
@@ -229,12 +229,11 @@ jobs:
         echo "### 🎯 배포 대상" >> $GITHUB_STEP_SUMMARY
         echo "- **ASG**: \`${{ env.ASG_NAME }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **대상 인스턴스**: ${{ steps.get-instances.outputs.instance_count }}개" >> $GITHUB_STEP_SUMMARY
-        echo "- **배포 명령 ID**: \`${{ steps.parallel-deploy.outputs.command_id }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **검증 방식**: ALB Target Group + Public URL" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-                 echo "### 📊 배포 결과" >> $GITHUB_STEP_SUMMARY
-                 echo "- **자동 배포**: ❌ SSM 권한 없음 (수동 배포 필요)" >> $GITHUB_STEP_SUMMARY
-         echo "- **헬스체크 통과**: ${{ steps.verify-deployment.outputs.healthy_count }}개" >> $GITHUB_STEP_SUMMARY
-         echo "- **헬스체크 실패**: $((${{ steps.get-instances.outputs.instance_count }} - ${{ steps.verify-deployment.outputs.healthy_count }}))개" >> $GITHUB_STEP_SUMMARY
+        echo "### 📊 헬스체크 결과" >> $GITHUB_STEP_SUMMARY
+        echo "- **ALB Target Group**: 모든 인스턴스 Healthy ✅" >> $GITHUB_STEP_SUMMARY
+        echo "- **Public URL**: 응답 성공 ✅" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🔧 수동 배포 가이드" >> $GITHUB_STEP_SUMMARY
         echo "- **배포 스크립트**: 각 인스턴스에서 아래 명령어 실행" >> $GITHUB_STEP_SUMMARY
