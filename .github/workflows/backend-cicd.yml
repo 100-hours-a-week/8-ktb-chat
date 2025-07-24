@@ -4,20 +4,20 @@ name: Backend API CI/CD
 
 on:
   push:
-    branches: [ jacky ]
+    branches: [ main, dev ]
     paths:
       - 'backend/**'
       - 'scripts/**'
-      - '.github/workflows/backend-api-cicd.yml'
+      - '.github/workflows/backend-cicd.yml'
   pull_request:
-    branches: [ jacky ]
+    branches: [ main, dev ]
     paths:
       - 'backend/**'
 
 # 환경 변수 설정
 env:
   AWS_REGION: ap-northeast-2
-  BASE_AMI_ID: ami-0f5e205427609c732  # Amazon Linux 2023 최신 AMI ID
+  BASE_AMI_ID: ami-0f5e205427609c732  # Amazon Linux 2023 최신 AMI ID 
   INSTANCE_TYPE: t3.small
   # 네트워크 설정
   VPC_ID: vpc-0cbb28aa7ecfee012
@@ -26,7 +26,7 @@ env:
   GITHUB_REPO: https://github.com/100-hours-a-week/8-ktb-chat.git
   GITHUB_BRANCH: jacky
   # ASG 관련 설정 - 사용자 요청에 따라 변경
-  LAUNCH_TEMPLATE_NAME: pumati-load-test-backend-20250724001044978300000001
+  LAUNCH_TEMPLATE_NAME: pumati-load-test-backend-20250724114952269200000003
   ASG_NAME: pumati-load-test-backend-asg
 
 jobs:
@@ -90,76 +90,138 @@ jobs:
         echo "PM2 설치 중..."
         npm install -g pm2
         
-        # 애플리케이션 사용자 생성
-        echo "애플리케이션 사용자 생성..."
-        useradd -m -s /bin/bash appuser
+        # ec2-user 사용 (Amazon Linux 기본 사용자)
+        echo "기본 사용자 ec2-user 사용..."
+        # useradd 필요 없음 - ec2-user는 이미 존재
         
         # 애플리케이션 디렉토리 생성
         echo "애플리케이션 디렉토리 설정..."
         mkdir -p /opt/ktb-chat-backend
-        chown appuser:appuser /opt/ktb-chat-backend
+        chown ec2-user:ec2-user /opt/ktb-chat-backend
         
         # GitHub에서 코드 클론
         echo "GitHub에서 백엔드 코드 클론 중..."
         cd /opt/ktb-chat-backend
         git clone -b ${{ env.GITHUB_BRANCH }} ${{ env.GITHUB_REPO }} .
         
-        # 백엔드 디렉토리로 이동 및 의존성 설치
+        # 백엔드 디렉토리로 이동 및 의존성 설치 (최적화)
         cd backend
-        echo "백엔드 의존성 설치 중..."
-        npm ci --production
+        echo "백엔드 의존성 설치 중... (병렬 설치 및 캐시 활용)"
+        # 병렬 설치 및 캐시 최적화로 속도 향상
+        npm ci --production --silent --prefer-offline --no-audit &
         
-        # 소유권 변경
-        chown -R appuser:appuser /opt/ktb-chat-backend
+        # 백그라운드에서 의존성 설치하는 동안 다른 설정 작업 진행
+        cd ..
         
-        # GitHub Secrets에서 환경 변수 파일 생성
+        # 로그 로테이션 설정 (의존성 설치와 병렬 진행)
+        cat > /etc/logrotate.d/ktb-chat-backend << 'EOFLOGROTATE'
+        /var/log/ktb-chat-backend*.log {
+            daily
+            rotate 30
+            compress
+            delaycompress
+            missingok
+            notifempty
+            create 644 ec2-user ec2-user
+            postrotate
+                /usr/bin/pm2 reloadLogs
+            endscript
+        }
+        EOFLOGROTATE
+        
+        # CloudWatch 에이전트 설치 (병렬)
+        echo "CloudWatch 에이전트 설치..."
+        yum install -y amazon-cloudwatch-agent &
+        
+        # 헬스체크 엔드포인트 확인 스크립트 생성
+        cat > /usr/local/bin/health-check.sh << 'EOFHEALTH'
+        #!/bin/bash
+        # 백엔드 애플리케이션 헬스체크
+        curl -f http://localhost:5001/health || exit 1
+        EOFHEALTH
+        chmod +x /usr/local/bin/health-check.sh
+        
+        # 의존성 설치 완료 대기
+        cd backend
+        wait  # npm ci 완료 대기
+        
+        # 소유권 변경 및 PM2 디렉토리 설정
+        chown -R ec2-user:ec2-user /opt/ktb-chat-backend
+        
+        # PM2 홈 디렉토리 생성 및 권한 설정
+        mkdir -p /opt/ktb-chat-backend/.pm2
+        chown -R ec2-user:ec2-user /opt/ktb-chat-backend/.pm2
+        
+        # 로그 디렉토리 권한 설정
+        mkdir -p /var/log
+        touch /var/log/ktb-chat-backend.log
+        touch /var/log/ktb-chat-backend-out.log  
+        touch /var/log/ktb-chat-backend-error.log
+        chown ec2-user:ec2-user /var/log/ktb-chat-backend*.log
+        
+        # GitHub Secrets에서 환경 변수 파일 생성 (.env 파일 위치 확실히 지정)
+        echo "환경변수 파일 생성 중..."
         cat > .env << 'EOFENV'
         ${{ secrets.ENV_BACKEND_DEV }}
         EOFENV
         
-        # PM2 ecosystem 파일 생성
+        # .env 파일 권한 설정 및 내용 확인
+        chown ec2-user:ec2-user .env
+        chmod 600 .env
+        echo "환경변수 파일 생성 완료. 내용 확인:"
+        echo "MONGO_URI가 설정되었는지 확인..."
+        grep -q "MONGO_URI" .env && echo "✅ MONGO_URI 설정됨" || echo "❌ MONGO_URI 누락"
+        
+        # PM2 ecosystem 파일 생성 (.env 파일 자동 로드)
         cat > ecosystem.config.js << 'EOFPM2'
         module.exports = {
           apps: [{
             name: 'ktb-chat-backend',
             script: 'server.js',
             cwd: '/opt/ktb-chat-backend/backend',
-            user: 'appuser',
             instances: 1,
-            exec_mode: 'cluster',
+            exec_mode: 'fork',
             watch: false,
             max_memory_restart: '1G',
+            env_file: '/opt/ktb-chat-backend/backend/.env',  // .env 파일 자동 로드
             env: {
               NODE_ENV: 'production',
-              PORT: 5000
+              PORT: 5001
             },
             log_file: '/var/log/ktb-chat-backend.log',
             out_file: '/var/log/ktb-chat-backend-out.log',
             error_file: '/var/log/ktb-chat-backend-error.log',
             merge_logs: true,
             time: true
+            // user, uid, gid 설정 제거 - PM2가 이미 ec2-user로 실행됨
           }]
         };
         EOFPM2
         
-        # systemd 서비스 파일 생성
+        # systemd 서비스 파일 생성 (.env 파일 사용)
         cat > /etc/systemd/system/ktb-chat-backend.service << 'EOFSYSTEMD'
         [Unit]
         Description=KTB Chat Backend Application
         After=network.target
         
         [Service]
-        Type=forking
-        User=appuser
-        WorkingDirectory=/opt/ktb-chat-backend
+        Type=simple
+        User=ec2-user
+        Group=ec2-user
+        WorkingDirectory=/opt/ktb-chat-backend/backend
+        # ecosystem.config.js 파일 사용으로 user 권한 문제 해결
         ExecStart=/usr/bin/pm2 start ecosystem.config.js --no-daemon
         ExecReload=/usr/bin/pm2 reload ecosystem.config.js
-        ExecStop=/usr/bin/pm2 kill
+        ExecStop=/usr/bin/pm2 stop ecosystem.config.js
         Restart=always
         RestartSec=10
         StandardOutput=syslog
         StandardError=syslog
         SyslogIdentifier=ktb-chat-backend
+        # 환경 변수 설정 (.env 파일에서 로드)
+        Environment=NODE_ENV=production
+        Environment=PM2_HOME=/opt/ktb-chat-backend/.pm2
+        EnvironmentFile=/opt/ktb-chat-backend/backend/.env
         
         [Install]
         WantedBy=multi-user.target
@@ -169,33 +231,8 @@ jobs:
         systemctl daemon-reload
         systemctl enable ktb-chat-backend.service
         
-        # 로그 로테이션 설정
-        cat > /etc/logrotate.d/ktb-chat-backend << 'EOFLOGROTATE'
-        /var/log/ktb-chat-backend*.log {
-            daily
-            rotate 30
-            compress
-            delaycompress
-            missingok
-            notifempty
-            create 644 appuser appuser
-            postrotate
-                /usr/bin/pm2 reloadLogs
-            endscript
-        }
-        EOFLOGROTATE
-        
-        # CloudWatch 에이전트 설치 (선택사항)
-        echo "CloudWatch 에이전트 설치..."
-        yum install -y amazon-cloudwatch-agent
-        
-        # 헬스체크 엔드포인트 확인 스크립트 생성
-        cat > /usr/local/bin/health-check.sh << 'EOFHEALTH'
-        #!/bin/bash
-        # 백엔드 애플리케이션 헬스체크
-        curl -f http://localhost:5000/health || exit 1
-        EOFHEALTH
-        chmod +x /usr/local/bin/health-check.sh
+        # 백그라운드 작업들 완료 대기
+        wait  # 모든 백그라운드 작업 완료 대기
         
         # API 서버 AMI 설정 완료 표시
         echo "=== API 서버 AMI 설정 완료: $(date) ==="
@@ -259,9 +296,9 @@ jobs:
         echo "⏳ 인스턴스 부팅 및 설정 대기 중..."
         aws ec2 wait instance-running --instance-ids ${INSTANCE_ID}
         
-        # 추가 대기 시간 (애플리케이션 설치 완료를 위해)
-        echo "📦 백엔드 애플리케이션 설치 중... (약 7분 소요)"
-        sleep 420
+        # 최적화된 대기 시간 (병렬 설치로 시간 단축)
+        echo "📦 백엔드 애플리케이션 설치 중... (약 3분 소요)"
+        sleep 180
         
         echo "✅ 인스턴스 설정 완료"
 
@@ -464,7 +501,7 @@ jobs:
         echo "- **인스턴스 새로고침 ID**: \`${{ steps.update-asg.outputs.refresh_id }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📊 모니터링" >> $GITHUB_STEP_SUMMARY
-        echo "- 애플리케이션 포트: 5000" >> $GITHUB_STEP_SUMMARY
+        echo "- 애플리케이션 포트: 5001" >> $GITHUB_STEP_SUMMARY
         echo "- 헬스체크: \`/health\` 엔드포인트" >> $GITHUB_STEP_SUMMARY
         echo "- 로그 위치: \`/var/log/ktb-chat-backend*.log\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
