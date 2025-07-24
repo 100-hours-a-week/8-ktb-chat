@@ -20,6 +20,8 @@ module.exports = function(io) {
   const MESSAGE_LOAD_TIMEOUT = 10000; // 메시지 로드 타임아웃 (10초)
   const RETRY_DELAY = 2000; // 재시도 간격 (2초)
   const DUPLICATE_LOGIN_TIMEOUT = 10000; // 중복 로그인 타임아웃 (10초)
+  const MESSAGE_CACHE_KEY_PREFIX = 'chat:room:';
+  const USER_COUNT_KEY_PREFIX = 'chat:room:users:';
 
   // 로깅 유틸리티 함수
   const logDebug = (action, data) => {
@@ -879,6 +881,121 @@ module.exports = function(io) {
         socket.emit('error', {
           message: error.message || '리액션 처리 중 오류가 발생했습니다.'
         });
+      }
+    });
+
+    // 메시지 캐싱 및 DB 플러시 로직 추가
+    socket.on('chatMessage', async (messageData) => {
+      try {
+        if (!socket.user) {
+          throw new Error('Unauthorized');
+        }
+
+        const { room, content } = messageData;
+        if (!room || !content) {
+          throw new Error('Invalid message data');
+        }
+
+        // Redis에 메시지 캐싱
+        const cacheKey = `${MESSAGE_CACHE_KEY_PREFIX}${room}`;
+        const message = {
+          sender: socket.user.id,
+          content,
+          timestamp: new Date().toISOString(),
+        };
+        await redisClient.rPush(cacheKey, JSON.stringify(message));
+
+        // 메시지 브로드캐스트
+        io.to(room).emit('message', message);
+      } catch (error) {
+        console.error('Chat message error:', error);
+        socket.emit('error', { message: '메시지 처리 중 오류가 발생했습니다.' });
+      }
+    });
+
+    socket.on('joinRoom', async (roomId) => {
+      try {
+        if (!socket.user) {
+          throw new Error('Unauthorized');
+        }
+
+        // Redis 사용자 수 증가
+        const userCountKey = `${USER_COUNT_KEY_PREFIX}${roomId}`;
+        await redisClient.incr(userCountKey);
+
+        socket.join(roomId);
+        socket.emit('joinRoomSuccess', { roomId });
+      } catch (error) {
+        console.error('Join room error:', error);
+        socket.emit('error', { message: '채팅방 입장 중 오류가 발생했습니다.' });
+      }
+    });
+
+    socket.on('leaveRoom', async (roomId) => {
+      try {
+        if (!socket.user) {
+          throw new Error('Unauthorized');
+        }
+
+        // Redis 사용자 수 감소
+        const userCountKey = `${USER_COUNT_KEY_PREFIX}${roomId}`;
+        const userCount = await redisClient.decr(userCountKey);
+
+        if (userCount <= 0) {
+          // Redis에서 메시지 가져와 DB에 저장
+          const cacheKey = `${MESSAGE_CACHE_KEY_PREFIX}${roomId}`;
+          const cachedMessages = await redisClient.lRange(cacheKey, 0, -1);
+          const messages = cachedMessages.map((msg) => JSON.parse(msg));
+
+          if (messages.length > 0) {
+            await Message.insertMany(
+              messages.map((msg) => ({
+                room: roomId,
+                sender: msg.sender,
+                content: msg.content,
+                timestamp: new Date(msg.timestamp),
+              }))
+            );
+            await redisClient.del(cacheKey);
+          }
+        }
+
+        socket.leave(roomId);
+        socket.emit('leaveRoomSuccess', { roomId });
+      } catch (error) {
+        console.error('Leave room error:', error);
+        socket.emit('error', { message: '채팅방 퇴장 중 오류가 발생했습니다.' });
+      }
+    });
+
+    socket.on('disconnect', async () => {
+      try {
+        const roomId = userRooms.get(socket.user.id);
+        if (roomId) {
+          const userCountKey = `${USER_COUNT_KEY_PREFIX}${roomId}`;
+          const userCount = await redisClient.decr(userCountKey);
+
+          if (userCount <= 0) {
+            // Redis에서 메시지 가져와 DB에 저장
+            const cacheKey = `${MESSAGE_CACHE_KEY_PREFIX}${roomId}`;
+            const cachedMessages = await redisClient.lRange(cacheKey, 0, -1);
+            const messages = cachedMessages.map((msg) => JSON.parse(msg));
+
+            if (messages.length > 0) {
+              await Message.insertMany(
+                messages.map((msg) => ({
+                  room: roomId,
+                  sender: msg.sender,
+                  content: msg.content,
+                  timestamp: new Date(msg.timestamp),
+                }))
+              );
+              await redisClient.del(cacheKey);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Disconnect error:', error);
       }
     });
   });

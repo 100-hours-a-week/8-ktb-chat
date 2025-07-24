@@ -56,6 +56,45 @@ class MockRedisClient {
     this.store.clear();
     console.log('Mock Redis connection closed');
   }
+
+  async incr(key) {
+    const item = this.store.get(key);
+    let value = item ? parseInt(item.value, 10) : 0;
+    value += 1;
+    this.store.set(key, { value: String(value), expires: item?.expires || null });
+    return value;
+  }
+
+  async decr(key) {
+    const item = this.store.get(key);
+    let value = item ? parseInt(item.value, 10) : 0;
+    value -= 1;
+    this.store.set(key, { value: String(value), expires: item?.expires || null });
+    return value;
+  }
+
+  async rPush(key, value) {
+    const item = this.store.get(key);
+    let list = item ? JSON.parse(item.value) : [];
+    if (!Array.isArray(list)) {
+      throw new Error('Key does not contain a list');
+    }
+    list.push(value);
+    this.store.set(key, { value: JSON.stringify(list), expires: item?.expires || null });
+    return list.length;
+  }
+
+  async lRange(key, start, stop) {
+    const item = this.store.get(key);
+    if (!item) return [];
+
+    const list = JSON.parse(item.value);
+    if (!Array.isArray(list)) {
+      throw new Error('Key does not contain a list');
+    }
+
+    return list.slice(start, stop + 1);
+  }
 }
 
 class RedisClient {
@@ -243,6 +282,57 @@ class RedisClient {
       } catch (error) {
         console.error('Redis quit error:', error);
       }
+    }
+  }
+
+  async incr(key) {
+    try {
+      if (!this.isConnected) {
+        await this.connect();
+      }
+
+      if (this.useMock) {
+        return await this.client.incr(key);
+      }
+
+      return await this.client.incr(key);
+    } catch (error) {
+      console.error('Redis incr error:', error);
+      throw error;
+    }
+  }
+
+  async decr(key) {
+    try {
+      if (!this.isConnected) {
+        await this.connect();
+      }
+
+      if (this.useMock) {
+        return await this.client.decr(key);
+      }
+
+      return await this.client.decr(key);
+    } catch (error) {
+      console.error('Redis decr error:', error);
+      throw error;
+    }
+  }
+
+  async rPush(key, value) {
+    try {
+      if (!this.isConnected) {
+        await this.connect();
+      }
+
+      if (this.useMock) {
+        return await this.client.rPush(key, value);
+      }
+
+      return await this.client.rPush(key, value);
+    } catch (error) {
+      console.error('Redis rPush error:', error);
+      throw error;
     }
   }
 }
