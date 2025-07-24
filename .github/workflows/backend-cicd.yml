@@ -104,16 +104,14 @@ jobs:
         cd /opt/ktb-chat-backend
         git clone -b ${{ env.GITHUB_BRANCH }} ${{ env.GITHUB_REPO }} .
         
-        # 백엔드 디렉토리로 이동 및 의존성 설치 (최적화)
+        # 백엔드 디렉토리로 이동 및 의존성 설치 (순차 실행으로 변경)
         cd backend
-        echo "백엔드 의존성 설치 중... (병렬 설치 및 캐시 활용)"
-        # 병렬 설치 및 캐시 최적화로 속도 향상
-        npm ci --production --silent --prefer-offline --no-audit &
+        echo "백엔드 의존성 설치 중..."
+        npm ci --production --silent --prefer-offline --no-audit
+        echo "✅ 의존성 설치 완료"
         
-        # 백그라운드에서 의존성 설치하는 동안 다른 설정 작업 진행
+        # 로그 로테이션 설정
         cd ..
-        
-        # 로그 로테이션 설정 (의존성 설치와 병렬 진행)
         cat > /etc/logrotate.d/ktb-chat-backend << 'EOFLOGROTATE'
         /var/log/ktb-chat-backend*.log {
             daily
@@ -129,9 +127,10 @@ jobs:
         }
         EOFLOGROTATE
         
-        # CloudWatch 에이전트 설치 (병렬)
+        # CloudWatch 에이전트 설치
         echo "CloudWatch 에이전트 설치..."
-        yum install -y amazon-cloudwatch-agent &
+        yum install -y amazon-cloudwatch-agent
+        echo "✅ CloudWatch 에이전트 설치 완료"
         
         # 헬스체크 엔드포인트 확인 스크립트 생성
         cat > /usr/local/bin/health-check.sh << 'EOFHEALTH'
@@ -156,9 +155,8 @@ jobs:
         EOFDEBUG
         chmod +x /usr/local/bin/debug-env.sh
         
-        # 의존성 설치 완료 대기
+        # 백엔드 디렉토리로 이동
         cd backend
-        wait  # npm ci 완료 대기
         
         # 소유권 변경 및 PM2 디렉토리 설정
         chown -R ec2-user:ec2-user /opt/ktb-chat-backend
@@ -263,8 +261,7 @@ jobs:
         echo "환경변수 로드 테스트:"
         su - ec2-user -c "cd /opt/ktb-chat-backend/backend && source .env && echo 'MONGO_URI 로드됨: ${MONGO_URI:0:20}...'" || true
         
-        # 백그라운드 작업들 완료 대기
-        wait  # 모든 백그라운드 작업 완료 대기
+        # 모든 설정 작업 완료
         
         # API 서버 AMI 설정 완료 표시
         echo "=== API 서버 AMI 설정 완료: $(date) ==="
