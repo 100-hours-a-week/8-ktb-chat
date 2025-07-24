@@ -1,5 +1,5 @@
 # 백엔드 API CI/CD 파이프라인 
-# AMI 빌드 및 Auto Scaling Group 자동 배포
+# AMI 빌드 및 Auto Scaling Group 자동 배포   
 name: Backend API CI/CD
 
 on:
