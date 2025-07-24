@@ -1,4 +1,4 @@
-# 백엔드 Dockerfile
+# REST API Dockerfile
 # Node.js 18 LTS 버전을 기반으로 함
 FROM node:18-alpine AS base
 
@@ -41,11 +41,11 @@ RUN mkdir -p uploads && \
 USER nodejs
 
 # 포트 노출 (환경변수로 설정 가능하도록)
-EXPOSE 5000
+EXPOSE 5001
 
 # 헬스체크 추가
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:5000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
+  CMD node -e "require('http').get('http://localhost:5001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
 
 # 프로덕션 모드로 실행
-CMD ["npm", "start"] 
+CMD ["npm", "start"]

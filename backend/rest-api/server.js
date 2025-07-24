@@ -2,15 +2,11 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const http = require('http');
-const socketIO = require('socket.io');
 const path = require('path');
-const { router: roomsRouter, initializeSocket } = require('./routes/api/rooms');
 const routes = require('./routes');
 
 const app = express();
-const server = http.createServer(app);
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.REST_API_PORT || 5001;
 
 // trust proxy 설정 추가
 app.set('trust proxy', 1);
@@ -73,13 +69,6 @@ app.get('/health', (req, res) => {
 // API 라우트 마운트
 app.use('/api', routes);
 
-// Socket.IO 설정
-const io = socketIO(server, { cors: corsOptions });
-require('./sockets/chat')(io);
-
-// Socket.IO 객체 전달
-initializeSocket(io);
-
 // 404 에러 핸들러
 app.use((req, res) => {
   console.log('404 Error:', req.originalUrl);
@@ -104,8 +93,8 @@ app.use((err, req, res, next) => {
 mongoose.connect(process.env.MONGO_URI)
   .then(() => {
     console.log('MongoDB Connected');
-    server.listen(PORT, '0.0.0.0', () => {
-      console.log(`Server running on port ${PORT}`);
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`REST API server running on port ${PORT}`);
       console.log('Environment:', process.env.NODE_ENV);
       console.log('API Base URL:', `http://0.0.0.0:${PORT}/api`);
     });
@@ -115,4 +104,4 @@ mongoose.connect(process.env.MONGO_URI)
     process.exit(1);
   });
 
-module.exports = { app, server };
+module.exports = app;

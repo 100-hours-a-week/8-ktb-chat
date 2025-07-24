@@ -180,7 +180,7 @@ export const useRoomHandling = (
       }
 
       const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/api/rooms/${roomId}`,
+        `${process.env.NEXT_PUBLIC_SOCKET_URL}/api/rooms/${roomId}`,
         {
           method: 'GET',
           headers: {
@@ -209,6 +209,8 @@ export const useRoomHandling = (
         throw new Error('채팅방 데이터가 올바르지 않습니다.');
       }
 
+      console.log('Fetched room data:', data.data); // Add console log here
+
       return data.data;
     } catch (error) {
       console.error('Fetch room data error:', error);
@@ -226,13 +228,17 @@ export const useRoomHandling = (
       throw new Error('Socket not connected');
     }
 
+    console.log(`[joinRoom] Attempting to join room: ${roomId}`); // 디버깅 로그 추가
+
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
+        console.error(`[joinRoom] Timeout while joining room: ${roomId}`); // 타임아웃 로그 추가
         reject(new Error('채팅방 입장 시간이 초과되었습니다.'));
       }, 20000);
 
       const handleSuccess = (data) => {
         clearTimeout(timeout);
+        console.log(`[joinRoom] Successfully joined room: ${roomId}`, data); // 성공 로그 추가
         userRooms?.set(socket.id, roomId);
         socket.off('joinRoomError', handleError);
         socket.off('error', handleError);
@@ -241,6 +247,7 @@ export const useRoomHandling = (
 
       const handleError = (error) => {
         clearTimeout(timeout);
+        console.error(`[joinRoom] Error while joining room: ${roomId}`, error); // 에러 로그 추가
         socket.off('joinRoomSuccess', handleSuccess);
         socket.off('error', handleError);
         reject(error);
@@ -250,7 +257,9 @@ export const useRoomHandling = (
       socket.once('joinRoomError', handleError);
       socket.once('error', handleError);
 
+      console.log(`[joinRoom] Emitting joinRoom event for room: ${roomId}`); // 이벤트 전송 로그 추가
       socket.emit('joinRoom', roomId);
+      console.log(`[joinRoom] joinRoom event emitted for room: ${roomId}`); // Emission log 추가
     });
   }, [socketRef, mountedRef, userRooms]);
 

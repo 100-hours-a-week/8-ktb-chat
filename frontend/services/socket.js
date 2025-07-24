@@ -80,7 +80,7 @@ class SocketService {
           this.cleanup(CLEANUP_REASONS.RECONNECT);
         }
 
-        const socketUrl = process.env.NEXT_PUBLIC_API_URL;
+        const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL;
         console.log('[Socket] Connecting to:', socketUrl);
 
         this.socket = io(socketUrl, {

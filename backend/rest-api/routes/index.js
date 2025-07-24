@@ -14,20 +14,10 @@ router.get('/', (req, res) => {
     version: '1.0.0',
     timestamp: new Date().toISOString(),
     endpoints: {
-      auth: {
-        base: '/auth',
-        routes: {
-          register: { method: 'POST', path: '/register' },
-          login: { method: 'POST', path: '/login' },
-          logout: { method: 'POST', path: '/logout' },
-          verifyToken: { method: 'GET', path: '/verify-token' },
-          refreshToken: { method: 'POST', path: '/refresh-token' }
-        }
-      },
+      auth: '/auth',
       users: '/users',
-      rooms: '/rooms',
       files: '/files',
-      ai: '/ai'
+      rooms: '/rooms'
     }
   });
 });
@@ -35,7 +25,7 @@ router.get('/', (req, res) => {
 // Mount routes
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
-router.use('/rooms', roomsRouter);  // roomsRouter로 변경
+router.use('/rooms', roomsRouter);
 router.use('/files', fileRoutes);
 
 module.exports = router;
