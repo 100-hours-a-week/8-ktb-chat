@@ -13,6 +13,9 @@ router.post('/upload',
   fileController.uploadFile
 );
 
+// S3 URL 저장
+router.post('/s3-url', auth, fileController.saveS3Url);
+
 // 파일 다운로드
 router.get('/download/:filename',
   auth,

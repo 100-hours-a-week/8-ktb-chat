@@ -137,6 +137,69 @@ exports.uploadFile = async (req, res) => {
   }
 };
 
+// S3 URL을 MongoDB에 저장 (새로 추가!)
+exports.saveS3Url = async (req, res) => {
+  try {
+    const { fileUrl, filename, mimetype, size } = req.body;
+    const userId = req.user.id;
+
+    console.log('[Controller] S3 URL 저장 요청:', {
+      fileUrl,
+      filename,
+      mimetype,
+      size,
+      userId
+    });
+
+    // 필수 데이터 검증
+    if (!fileUrl || !filename || !mimetype || !size) {
+      return res.status(400).json({
+        success: false,
+        message: '필수 파일 정보가 누락되었습니다.'
+      });
+    }
+
+    // 고유한 filename 생성 (기존 로직과 동일)
+    const safeFilename = generateSafeFilename(filename);
+
+    const fileDoc = new File({
+      filename: safeFilename,
+      originalname: filename,
+      mimetype,
+      size,
+      user: userId,
+      path: fileUrl, // S3 URL을 path에 저장
+      uploadDate: new Date()
+    });
+
+    await fileDoc.save();
+
+    console.log('[Controller] S3 URL 저장 완료:', fileDoc._id);
+
+    res.json({
+      success: true,
+      message: 'S3 파일 정보 저장 성공',
+      file: {
+        _id: fileDoc._id,
+        filename: fileDoc.filename,
+        originalname: fileDoc.originalname,
+        mimetype: fileDoc.mimetype,
+        size: fileDoc.size,
+        uploadDate: fileDoc.uploadDate,
+        url: fileUrl
+      }
+    });
+
+  } catch (error) {
+    console.error('S3 URL 저장 오류:', error);
+    res.status(500).json({
+      success: false,
+      message: '파일 정보 저장에 실패했습니다.',
+      error: error.message
+    });
+  }
+};
+
 exports.downloadFile = async (req, res) => {
   try {
     const { file, filePath } = await getFileFromRequest(req);
