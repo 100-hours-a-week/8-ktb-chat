@@ -110,7 +110,25 @@ jobs:
           set -e
           
           echo "🚀 자동 배포 시작..."
+          
+          # Node.js 및 PM2 설치 확인 및 설치
+          if ! command -v node &> /dev/null; then
+            echo "📦 Node.js 설치 중..."
+            curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
+            sudo yum install -y nodejs
+          fi
+          
+          if ! command -v pm2 &> /dev/null; then
+            echo "📦 PM2 설치 중..."
+            sudo npm install -g pm2
+          fi
+          
+          echo "✅ 환경 설정 완료"
+          
+          # 시스템 최적화
           sudo swapoff -a
+          
+          # 코드 다운로드 및 .env 파일 생성
           cd /tmp && rm -rf ktb-new
           git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new
           
@@ -119,12 +137,15 @@ jobs:
           ${{ secrets.ENV_BACKEND_DEV }}
           EOF
           
+          # 애플리케이션 배포
           sudo -u ec2-user pm2 delete all || true
           sudo mkdir -p /opt/ktb-chat-backend
           sudo cp -r ktb-new/backend /opt/ktb-chat-backend/
           sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend
           cd /opt/ktb-chat-backend/backend
           sudo -u ec2-user npm ci --production
+          
+          # PM2 클러스터 모드로 시작
           sudo -u ec2-user pm2 start server.js \
             --name 'ktb-backend-cluster' \
             --instances 2 \
@@ -133,6 +154,7 @@ jobs:
             --node-args='--max-old-space-size=600'
           sudo -u ec2-user pm2 save
           sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user
+          
           sleep 5 && sudo -u ec2-user pm2 list
           echo "✅ 배포 완료!"
 
