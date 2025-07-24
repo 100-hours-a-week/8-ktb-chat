@@ -56,12 +56,26 @@ const FileMessage = ({
 
   useEffect(() => {
     if (msg?.file) {
-      const url = fileService.getPreviewUrl(msg.file, true);
-      setPreviewUrl(url);
-      console.debug('Preview URL generated:', {
-        filename: msg.file.filename,
-        url
-      });
+      console.debug('File message data:', msg.file); // 전체 파일 데이터 확인
+      
+      // S3 URL 생성 (filename 기반)
+      if (msg.file.filename) {
+        // S3 URL 패턴: https://8-ktb-chat-images.s3.ap-northeast-2.amazonaws.com/{filename}
+        const s3Url = `https://8-ktb-chat-images.s3.ap-northeast-2.amazonaws.com/${msg.file.filename}`;
+        setPreviewUrl(s3Url);
+        console.debug('Using S3 URL:', {
+          filename: msg.file.filename,
+          s3Url
+        });
+      } else {
+        // fallback to fileService
+        const url = fileService.getPreviewUrl(msg.file, true);
+        setPreviewUrl(url);
+        console.debug('Using fileService URL:', {
+          filename: msg.file.filename,
+          url
+        });
+      }
     }
   }, [msg?.file]);
 
@@ -131,6 +145,20 @@ const FileMessage = ({
         throw new Error('파일 정보가 없습니다.');
       }
 
+      // S3 URL 직접 사용
+      if (msg.file.filename) {
+        const s3Url = `https://8-ktb-chat-images.s3.ap-northeast-2.amazonaws.com/${msg.file.filename}`;
+        const link = document.createElement('a');
+        link.href = s3Url;
+        link.download = getDecodedFilename(msg.file.originalname);
+        link.target = '_blank';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        return;
+      }
+
+      // 기존 방식 (fileService 사용) - fallback
       const user = authService.getCurrentUser();
       if (!user?.token || !user?.sessionId) {
         throw new Error('인증 정보가 없습니다.');
@@ -162,6 +190,18 @@ const FileMessage = ({
         throw new Error('파일 정보가 없습니다.');
       }
 
+      // S3 URL 직접 사용
+      if (msg.file.filename) {
+        const s3Url = `https://8-ktb-chat-images.s3.ap-northeast-2.amazonaws.com/${msg.file.filename}`;
+        const newWindow = window.open(s3Url, '_blank');
+        if (!newWindow) {
+          throw new Error('팝업이 차단되었습니다. 팝업 차단을 해제해주세요.');
+        }
+        newWindow.opener = null;
+        return;
+      }
+
+      // 기존 방식 (fileService 사용) - fallback
       const user = authService.getCurrentUser();
       if (!user?.token || !user?.sessionId) {
         throw new Error('인증 정보가 없습니다.');
@@ -183,20 +223,13 @@ const FileMessage = ({
 
   const renderImagePreview = (originalname) => {
     try {
-      if (!msg?.file?.filename) {
+      if (!previewUrl) {
         return (
           <div className="flex items-center justify-center h-full bg-gray-100">
             <Image className="w-8 h-8 text-gray-400" />
           </div>
         );
       }
-
-      const user = authService.getCurrentUser();
-      if (!user?.token || !user?.sessionId) {
-        throw new Error('인증 정보가 없습니다.');
-      }
-
-      const previewUrl = fileService.getPreviewUrl(msg.file, true);
 
       return (
         <div className="bg-transparent-pattern">
@@ -210,13 +243,15 @@ const FileMessage = ({
             onError={(e) => {
               console.error('Image load error:', {
                 error: e.error,
-                originalname
+                originalname,
+                previewUrl
               });
               e.target.onerror = null; 
               e.target.src = '/images/placeholder-image.png';
               setError('이미지를 불러올 수 없습니다.');
             }}
             loading="lazy"
+            crossOrigin="anonymous" // S3 CORS를 위해 추가
           />
         </div>
       );
@@ -266,7 +301,7 @@ const FileMessage = ({
                 controls
                 preload="metadata"
                 aria-label={`${originalname} 비디오`}
-                crossOrigin="use-credentials"
+                crossOrigin="anonymous" // S3 CORS를 위해 추가
               >
                 <source src={previewUrl} type={mimetype} />
                 <track kind="captions" />
@@ -305,7 +340,7 @@ const FileMessage = ({
                 controls
                 preload="metadata"
                 aria-label={`${originalname} 오디오`}
-                crossOrigin="use-credentials"
+                crossOrigin="anonymous" // S3 CORS를 위해 추가
               >
                 <source src={previewUrl} type={mimetype} />
                 오디오를 재생할 수 없습니다.
