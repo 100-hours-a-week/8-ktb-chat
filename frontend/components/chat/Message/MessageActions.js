@@ -6,12 +6,12 @@ import EmojiPicker from '../EmojiPicker';
 import { Toast } from '../../Toast';
 
 const MessageActions = ({ 
-  messageId,
-  messageContent,
-  reactions,
-  currentUserId,
-  onReactionAdd,
-  onReactionRemove,
+  messageId = '',
+  messageContent = '',
+  reactions = {},
+  currentUserId = null,
+  onReactionAdd = () => {},
+  onReactionRemove = () => {},
   isMine = false,
   room = null
 }) => {
@@ -252,17 +252,6 @@ const MessageActions = ({
       </div>
     </div>
   );
-};
-
-MessageActions.defaultProps = {
-  messageId: '',
-  messageContent: '',
-  reactions: {},
-  currentUserId: null,
-  onReactionAdd: () => {},
-  onReactionRemove: () => {},
-  isMine: false,
-  room: null
 };
 
 export default React.memo(MessageActions);

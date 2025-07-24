@@ -5,16 +5,15 @@ import PersistentAvatar from '../../common/PersistentAvatar';
 import ReadStatus from '../ReadStatus';
 import { generateColorFromEmail, getContrastTextColor } from '../../../utils/colorUtils';
 
-const UserMessage = ({
+const UserMessage = React.forwardRef(({
   msg = {}, 
   isMine = false, 
   currentUser = null,
   onReactionAdd,
   onReactionRemove,
   room = null,
-  messageRef,
   socketRef
-}) => {
+}, ref) => {
   const formattedTime = new Date(msg.timestamp).toLocaleString('ko-KR', {
     year: 'numeric',
     month: 'long',
@@ -37,7 +36,7 @@ const UserMessage = ({
   const user = isMine ? currentUser : msg.sender;
 
   return (
-    <div className="messages">
+    <div className="messages" ref={ref}>
       <div className={`message-group ${isMine ? 'mine' : 'yours'}`}>
         <div className="message-sender-info">
           <PersistentAvatar
@@ -63,7 +62,7 @@ const UserMessage = ({
               participants={room.participants}
               readers={msg.readers}
               messageId={msg._id}
-              messageRef={messageRef}
+              messageRef={ref}
               currentUserId={currentUser.id}
               socketRef={socketRef}
             />            
@@ -83,7 +82,7 @@ const UserMessage = ({
       </div>
     </div>
   );
-};
+});
 
 UserMessage.defaultProps = {
   msg: {},
