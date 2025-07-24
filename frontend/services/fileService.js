@@ -2,6 +2,22 @@ import axios, { isCancel, CancelToken } from "axios";
 import authService from "./authService";
 import { Toast } from "../components/Toast";
 
+
+export async function saveS3UrlToBackend(s3Url, originalname) {
+  const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/files/save-url`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: s3Url, originalname }),
+  });
+
+  const data = await response.json();
+  if (!response.ok || !data.success) {
+    throw new Error(data.message || "URL 저장 실패");
+  }
+
+  return data.file;
+}
+
 class FileService {
   constructor() {
     this.baseUrl = process.env.NEXT_PUBLIC_API_URL;
@@ -106,72 +122,190 @@ class FileService {
   }
 
   async uploadFile(file, onProgress) {
+    console.log("[Upload] 📂 업로드 시작 - 파일명:", file.name, "크기:", file.size, "타입:", file.type);
+    
     const validationResult = await this.validateFile(file);
     if (!validationResult.success) {
+      console.error("[Upload] ❌ 파일 유효성 검사 실패:", validationResult.message);
       return validationResult;
     }
+    console.log("[Upload] ✅ 파일 유효성 검사 통과");
 
     try {
+      // 인증 정보 확인
       const user = authService.getCurrentUser();
+      console.log("[Upload] 🔐 인증 정보 확인:", {
+        hasToken: !!user?.token,
+        hasSessionId: !!user?.sessionId,
+        tokenLength: user?.token?.length,
+      });
+      
       if (!user?.token || !user?.sessionId) {
+        console.warn("[Upload] ❌ 인증 정보 없음");
         return {
           success: false,
           message: "인증 정보가 없습니다.",
         };
       }
 
-      const formData = new FormData();
-      formData.append("file", file);
-
       const source = CancelToken.source();
       this.activeUploads.set(file.name, source);
 
-      const uploadUrl = this.baseUrl
-        ? `${this.baseUrl}/api/files/upload`
-        : "/api/files/upload";
+      // S3 URL 준비
+      const fileKey = `${Date.now()}-${file.name}`;
+      const s3Bucket = "8-ktb-chat-images";
+      const s3Region = "ap-northeast-2";
+      const s3Url = `https://${s3Bucket}.s3.${s3Region}.amazonaws.com/${fileKey}`;
 
-      const response = await axios.post(uploadUrl, formData, {
-        headers: {
-          "Content-Type": "multipart/form-data",
-          "x-auth-token": user.token,
-          "x-session-id": user.sessionId,
-        },
+      console.log("[Upload] 🌐 S3 업로드 준비:", {
+        fileKey,
+        s3Bucket,
+        s3Region,
+        s3Url,
+        encodedUrl: encodeURI(s3Url)
+      });
+
+      // S3 업로드 헤더 확인 (ACL 헤더 제거)
+      const uploadHeaders = {
+        "Content-Type": file.type
+        // "x-amz-acl": "public-read" // 403 에러 방지를 위해 제거
+      };
+      console.log("[Upload] 📋 S3 업로드 헤더:", uploadHeaders);
+
+      console.log("[Upload] 🚀 S3 PUT 요청 시작...");
+      
+      const uploadRes = await axios.put(s3Url, file, {
+        headers: uploadHeaders,
         cancelToken: source.token,
-        withCredentials: true,
+        timeout: 60000, // 60초 타임아웃
         onUploadProgress: (progressEvent) => {
+          const percentCompleted = Math.round(
+            (progressEvent.loaded * 100) / progressEvent.total
+          );
+          console.log(`[Upload] 📊 업로드 진행률: ${percentCompleted}%`);
           if (onProgress) {
-            const percentCompleted = Math.round(
-              (progressEvent.loaded * 100) / progressEvent.total
-            );
             onProgress(percentCompleted);
           }
         },
       });
 
-      this.activeUploads.delete(file.name);
+      console.log("[Upload] 📨 S3 응답 수신:", {
+        status: uploadRes.status,
+        statusText: uploadRes.statusText,
+        headers: uploadRes.headers,
+        data: uploadRes.data
+      });
 
-      if (!response.data || !response.data.success) {
+      if (uploadRes.status !== 200) {
+        console.error("[Upload] ❌ S3 업로드 실패 - 상태 코드:", uploadRes.status);
+        console.error("[Upload] 응답 상세:", uploadRes);
         return {
           success: false,
-          message: response.data?.message || "파일 업로드에 실패했습니다.",
+          message: `S3 업로드에 실패했습니다. (상태: ${uploadRes.status})`,
+        };
+      }
+
+      console.log("[Upload] ✅ S3 업로드 완료:", s3Url);
+
+      // 백엔드 API 호출 준비
+      const uploadUrl = this.baseUrl
+        ? `${this.baseUrl}/api/files/s3-url`
+        : "/api/files/s3-url";
+
+      const backendPayload = {
+        fileUrl: s3Url,
+        filename: file.name,
+        mimetype: file.type,
+        size: file.size,
+      };
+
+      const backendHeaders = {
+        "x-auth-token": user.token,
+        "x-session-id": user.sessionId,
+      };
+
+      console.log("[Upload] 🔄 백엔드 API 호출 준비:", {
+        url: uploadUrl,
+        payload: backendPayload,
+        headers: { ...backendHeaders, "x-auth-token": "***토큰숨김***" }
+      });
+
+      console.log("[Upload] 🚀 백엔드 POST 요청 시작...");
+
+      const response = await axios.post(uploadUrl, backendPayload, {
+        headers: backendHeaders,
+        withCredentials: true,
+        timeout: 30000, // 30초 타임아웃
+      });
+
+      this.activeUploads.delete(file.name);
+
+      console.log("[Upload] 📨 백엔드 응답 수신:", {
+        status: response.status,
+        statusText: response.statusText,
+        data: response.data
+      });
+
+      if (!response.data || !response.data.success) {
+        console.error("[Upload] ❌ 백엔드 응답 실패:", response.data);
+        return {
+          success: false,
+          message: response.data?.message || "백엔드 전송에 실패했습니다.",
         };
       }
 
       const fileData = response.data.file;
+      console.log("[Upload] ✅ 전체 업로드 프로세스 완료:", fileData);
+      
       return {
         success: true,
         data: {
           ...response.data,
           file: {
             ...fileData,
-            url: this.getFileUrl(fileData.filename, true),
+            url: s3Url,
           },
         },
       };
+
     } catch (error) {
       this.activeUploads.delete(file.name);
 
+      // 에러 상세 정보 로깅
+      console.error("[Upload] 💥 예외 발생:", {
+        message: error.message,
+        name: error.name,
+        code: error.code,
+        stack: error.stack
+      });
+
+      // Axios 에러인 경우 더 상세한 정보
+      if (error.response) {
+        console.error("[Upload] 📨 서버 응답 에러:", {
+          status: error.response.status,
+          statusText: error.response.statusText,
+          headers: error.response.headers,
+          data: error.response.data
+        });
+      } else if (error.request) {
+        console.error("[Upload] 📡 요청 에러 (응답 없음):", {
+          request: error.request,
+          readyState: error.request.readyState,
+          status: error.request.status,
+          responseText: error.request.responseText
+        });
+      }
+
+      // 네트워크 에러 상세 분석
+      if (error.code === 'ERR_NETWORK') {
+        console.error("[Upload] 🌐 네트워크 에러 상세:");
+        console.error("- CORS 문제일 가능성이 높습니다");
+        console.error("- S3 버킷의 CORS 설정을 확인하세요");
+        console.error("- 브라우저 개발자 도구의 Network 탭을 확인하세요");
+      }
+
       if (isCancel(error)) {
+        console.warn("[Upload] ⏹️ 업로드 취소됨");
         return {
           success: false,
           message: "업로드가 취소되었습니다.",
@@ -179,16 +313,20 @@ class FileService {
       }
 
       if (error.response?.status === 401) {
+        console.warn("[Upload] 🔐 인증 만료됨, 토큰 재발급 시도");
         try {
           const refreshed = await authService.refreshToken();
           if (refreshed) {
+            console.log("[Upload] ✅ 토큰 재발급 성공, 업로드 재시도");
             return this.uploadFile(file, onProgress);
           }
+          console.error("[Upload] ❌ 토큰 재발급 실패");
           return {
             success: false,
             message: "인증이 만료되었습니다. 다시 로그인해주세요.",
           };
         } catch (refreshError) {
+          console.error("[Upload] 💥 토큰 재발급 중 예외:", refreshError);
           return {
             success: false,
             message: "인증이 만료되었습니다. 다시 로그인해주세요.",
@@ -199,6 +337,7 @@ class FileService {
       return this.handleUploadError(error);
     }
   }
+
   async downloadFile(filename, originalname) {
     try {
       const user = authService.getCurrentUser();
