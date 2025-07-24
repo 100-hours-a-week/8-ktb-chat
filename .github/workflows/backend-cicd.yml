@@ -4,7 +4,7 @@ name: Backend API CI/CD
 
 on:
   push:
-    branches: [ dev ]
+    branches: [ dev, jacky2 ]
     paths:
       - 'backend/**'
       - 'scripts/**'

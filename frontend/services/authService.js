@@ -110,7 +110,15 @@ class AuthService {
 
   async login(credentials) {
     try {
-      const response = await axios.post(`${API_URL}/api/auth/login`, credentials);
+      // 로그인 요청에는 인증 헤더가 필요 없으므로 axios를 직접 사용
+      const response = await axios.post(`${API_URL}/api/auth/login`, credentials, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        withCredentials: true,
+        timeout: 30000
+      });
 
       if (response.data?.success && response.data?.token) {
         const userData = {
@@ -125,6 +133,15 @@ class AuthService {
 
         localStorage.setItem('user', JSON.stringify(userData));
         window.dispatchEvent(new Event('authStateChange'));
+        
+        // 로그인 성공 로그 추가
+        console.log('[Auth] Login successful, user data stored:', {
+          id: userData.id,
+          name: userData.name,
+          hasToken: !!userData.token,
+          hasSessionId: !!userData.sessionId
+        });
+        
         return userData;
       }
 
@@ -347,12 +364,7 @@ class AuthService {
         return true;
       }
 
-      const response = await axiosInstance.post('/api/auth/verify-token', {
-        headers: {
-          'x-auth-token': user.token,
-          'x-session-id': user.sessionId
-        }
-      });
+      const response = await api.post('/api/auth/verify-token');
 
       if (response.data.success) {
         // 토큰 검증 시간 업데이트
