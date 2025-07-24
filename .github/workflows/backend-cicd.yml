@@ -402,28 +402,118 @@ jobs:
           echo "먼저 AWS 콘솔에서 해당 템플릿을 생성하거나 템플릿 이름을 확인해주세요."
           exit 1
         fi
-    - name: Auto Scaling Group 업데이트 및 인스턴스 새로고침
+    - name: Auto Scaling Group 빠른 재배포 (Stop-and-Start)
       id: update-asg
       run: |
-        echo "📈 Auto Scaling Group 업데이트 및 인스턴스 교체 중..."
+        echo "📈 Auto Scaling Group 빠른 재배포 시작..."
         
-        # Launch Template AMI 업데이트
+        # 1. 현재 ASG 설정 정보 가져오기
+        echo "📋 현재 ASG 설정 정보 수집 중..."
+        ASG_INFO=$(aws autoscaling describe-auto-scaling-groups \
+          --auto-scaling-group-names ${{ env.ASG_NAME }} \
+          --query 'AutoScalingGroups[0]' \
+          --output json)
+        
+        # 원래 Desired, Min, Max Capacity 값 저장
+        ORIGINAL_DESIRED=$(echo "$ASG_INFO" | jq -r '.DesiredCapacity')
+        ORIGINAL_MIN=$(echo "$ASG_INFO" | jq -r '.MinSize')
+        ORIGINAL_MAX=$(echo "$ASG_INFO" | jq -r '.MaxSize')
+        
+        echo "원래 ASG 설정:"
+        echo "- Desired Capacity: ${ORIGINAL_DESIRED}"
+        echo "- Min Size: ${ORIGINAL_MIN}"
+        echo "- Max Size: ${ORIGINAL_MAX}"
+        
+        # 2. Launch Template AMI 업데이트
+        echo "🔧 Launch Template AMI 업데이트 중..."
         aws autoscaling update-auto-scaling-group \
           --auto-scaling-group-name ${{ env.ASG_NAME }} \
           --launch-template LaunchTemplateName=${{ env.LAUNCH_TEMPLATE_NAME }},Version='$Latest'
         
         echo "✅ ASG Launch Template 업데이트 완료"
         
-        # 인스턴스 새로고침 시작 (기본 설정 사용으로 간소화)
-        echo "🔄 전체 인스턴스 새로고침 시작..."
-        REFRESH_ID=$(aws autoscaling start-instance-refresh \
+        # 3. ASG 인스턴스 개수를 0으로 축소
+        echo "🛑 ASG 인스턴스 개수를 0으로 축소 중..."
+        aws autoscaling update-auto-scaling-group \
           --auto-scaling-group-name ${{ env.ASG_NAME }} \
-          --query 'InstanceRefreshId' \
+          --desired-capacity 0 \
+          --min-size 0
+        
+        # 4. 모든 인스턴스가 종료될 때까지 대기
+        echo "⏳ 모든 인스턴스 종료 대기 중..."
+        while true; do
+          INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names ${{ env.ASG_NAME }} \
+            --query 'AutoScalingGroups[0].Instances | length(@)' \
+            --output text)
+          
+          if [[ "$INSTANCE_COUNT" == "0" ]]; then
+            echo "✅ 모든 인스턴스가 종료되었습니다"
+            break
+          fi
+          
+          echo "현재 인스턴스 개수: ${INSTANCE_COUNT} (종료 대기 중...)"
+          sleep 15
+        done
+        
+        # 5. 원래 설정으로 ASG 복원 (새 AMI로 인스턴스 시작)
+        echo "🚀 새 AMI로 ASG 인스턴스 재시작 중..."
+        aws autoscaling update-auto-scaling-group \
+          --auto-scaling-group-name ${{ env.ASG_NAME }} \
+          --desired-capacity ${ORIGINAL_DESIRED} \
+          --min-size ${ORIGINAL_MIN} \
+          --max-size ${ORIGINAL_MAX}
+        
+        # 6. 새 인스턴스들이 InService 상태가 될 때까지 대기
+        echo "⏳ 새 인스턴스들이 준비될 때까지 대기 중..."
+        TARGET_INSTANCES=${ORIGINAL_DESIRED}
+        
+        while true; do
+          IN_SERVICE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names ${{ env.ASG_NAME }} \
+            --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`] | length(@)' \
+            --output text)
+          
+          TOTAL_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names ${{ env.ASG_NAME }} \
+            --query 'AutoScalingGroups[0].Instances | length(@)' \
+            --output text)
+          
+          echo "인스턴스 상태: ${IN_SERVICE_COUNT}/${TARGET_INSTANCES} InService (전체: ${TOTAL_INSTANCES})"
+          
+          if [[ "$IN_SERVICE_COUNT" == "$TARGET_INSTANCES" ]]; then
+            echo "🎉 모든 인스턴스가 InService 상태가 되었습니다!"
+            break
+          fi
+          
+          sleep 20
+        done
+        
+        # 7. 헬스체크 확인 (선택사항)
+        echo "🔍 새 인스턴스 헬스체크 확인 중..."
+        INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+          --auto-scaling-group-names ${{ env.ASG_NAME }} \
+          --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
           --output text)
         
-        echo "refresh_id=${REFRESH_ID}" >> $GITHUB_OUTPUT
-        echo "✅ 인스턴스 새로고침 시작됨: ${REFRESH_ID}"
-        echo "ℹ️ 새로고침은 백그라운드에서 진행됩니다. AWS 콘솔에서 진행 상황을 확인하세요."
+        for INSTANCE_ID in $INSTANCE_IDS; do
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+          
+          if [[ "$PUBLIC_IP" != "None" && "$PUBLIC_IP" != "" ]]; then
+            echo "인스턴스 ${INSTANCE_ID} (${PUBLIC_IP}) 헬스체크 중..."
+            # 헬스체크는 선택사항으로 타임아웃 없이 1번만 시도
+            curl -f -m 10 "http://${PUBLIC_IP}:5001/health" >/dev/null 2>&1 && \
+              echo "✅ 헬스체크 성공" || echo "⚠️ 헬스체크 응답 없음 (서비스 시작 중일 수 있음)"
+          fi
+        done
+        
+        echo "✅ 빠른 재배포 완료!"
+        echo "original_desired=${ORIGINAL_DESIRED}" >> $GITHUB_OUTPUT
+        echo "original_min=${ORIGINAL_MIN}" >> $GITHUB_OUTPUT
+        echo "original_max=${ORIGINAL_MAX}" >> $GITHUB_OUTPUT
     - name: 인스턴스 정리
       if: always()
       run: |
@@ -456,8 +546,8 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🚀 배포 정보" >> $GITHUB_STEP_SUMMARY
         echo "- **Launch Template**: \`${{ env.LAUNCH_TEMPLATE_NAME }}\` (버전 ${{ steps.update-template.outputs.template_version }})" >> $GITHUB_STEP_SUMMARY
-        echo "- **Auto Scaling Group**: \`${{ env.ASG_NAME }}\` (인스턴스 새로고침 진행 중)" >> $GITHUB_STEP_SUMMARY
-        echo "- **인스턴스 새로고침 ID**: \`${{ steps.update-asg.outputs.refresh_id }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Auto Scaling Group**: \`${{ env.ASG_NAME }}\` (빠른 재배포 완료)" >> $GITHUB_STEP_SUMMARY
+        echo "- **복원된 설정**: Desired=${{ steps.update-asg.outputs.original_desired }}, Min=${{ steps.update-asg.outputs.original_min }}, Max=${{ steps.update-asg.outputs.original_max }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📊 모니터링" >> $GITHUB_STEP_SUMMARY
         echo "- 애플리케이션 포트: 5001" >> $GITHUB_STEP_SUMMARY
@@ -465,7 +555,8 @@ jobs:
         echo "- 로그 위치: \`/var/log/ktb-chat-backend*.log\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### ⚠️ 배포 주의사항" >> $GITHUB_STEP_SUMMARY
-        echo "- 인스턴스 새로고침이 백그라운드에서 진행됩니다" >> $GITHUB_STEP_SUMMARY
-        echo "- AWS 콘솔에서 새로고침 진행 상황을 확인하세요" >> $GITHUB_STEP_SUMMARY
-        echo "- 기존 ASG 설정이 그대로 유지됩니다" >> $GITHUB_STEP_SUMMARY
+        echo "- **빠른 재배포 방식 사용**: 모든 인스턴스를 0개로 축소 후 재시작" >> $GITHUB_STEP_SUMMARY
+        echo "- **다운타임 발생**: 인스턴스 종료~재시작 구간에서 일시적 서비스 중단" >> $GITHUB_STEP_SUMMARY
+        echo "- **원본 설정 복원**: ASG의 원래 Desired/Min/Max 설정이 자동으로 복원됩니다" >> $GITHUB_STEP_SUMMARY
+        echo "- **새 AMI 적용**: 모든 인스턴스가 최신 AMI로 교체되었습니다" >> $GITHUB_STEP_SUMMARY
         echo "- MongoDB, Redis 연결을 확인해주세요" >> $GITHUB_STEP_SUMMARY
