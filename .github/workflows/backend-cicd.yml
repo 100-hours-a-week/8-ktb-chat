@@ -101,62 +101,16 @@ jobs:
 
     - name: 🚀 EC2에 완전 자동 배포 실행 (SSM)
       run: |
-        echo "🚀 Systems Manager를 통한 완전 자동 배포 시작..."
-        
-        # 배포 스크립트 생성
-        DEPLOY_SCRIPT=$(cat << 'SCRIPT_EOF'
-        #!/bin/bash
-        set -e
-        
-        echo "=== [1/4] 시스템 최적화 ==="
-        sudo swapoff -a
-        echo "✅ 스왑 비활성화 완료"
-        
-        echo "=== [2/4] 코드 다운로드 및 .env 파일 생성 ==="
-        cd /tmp && rm -rf ktb-new
-        git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new
-        
-        # .env 파일을 다운받은 코드 폴더에 직접 생성
-        cat << 'ENV_EOF' > /tmp/ktb-new/backend/.env
-        ${{ secrets.ENV_BACKEND_DEV }}
-        ENV_EOF
-        echo "✅ .env 파일 생성 완료"
-        
-        echo "=== [3/4] 애플리케이션 배포 ==="
-        sudo -u ec2-user pm2 delete all || true
-        sudo mkdir -p /opt/ktb-chat-backend
-        sudo cp -r ktb-new/backend /opt/ktb-chat-backend/
-        sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend
-        cd /opt/ktb-chat-backend/backend
-        sudo -u ec2-user npm ci --production
-        echo "✅ 코드 배포 완료"
-        
-        echo "=== [4/4] 애플리케이션 시작 ==="
-        sudo -u ec2-user pm2 start server.js \
-          --name 'ktb-backend-cluster' \
-          --instances 2 \
-          --exec-mode cluster \
-          --max-memory-restart 700M \
-          --node-args='--max-old-space-size=600'
-        sudo -u ec2-user pm2 save
-        sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user
-        echo "✅ 애플리케이션 시작 완료"
-        
-        echo "=== 최종 상태 확인 ==="
-        sleep 5
-        sudo -u ec2-user pm2 list
-        curl -f http://localhost:5001/health || echo "❌ 헬스체크 실패!"
-        SCRIPT_EOF
-        )
+        echo "🚀 간단한 배포 스크립트 실행..."
         
         # 각 인스턴스에 명령 실행
         for INSTANCE_ID in ${{ steps.get-instances.outputs.instance_ids }}; do
-          echo "📡 인스턴스 ${INSTANCE_ID}에 배포 스크립트 실행 중..."
+          echo "📡 인스턴스 ${INSTANCE_ID}에 배포 중..."
           
           aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --parameters "commands=['$DEPLOY_SCRIPT']" \
+            --parameters 'commands=["sudo swapoff -a","cd /tmp && rm -rf ktb-new","git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new","echo \"${{ secrets.ENV_BACKEND_DEV }}\" > /tmp/ktb-new/backend/.env","sudo -u ec2-user pm2 delete all || true","sudo mkdir -p /opt/ktb-chat-backend","sudo cp -r ktb-new/backend /opt/ktb-chat-backend/","sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend","cd /opt/ktb-chat-backend/backend && sudo -u ec2-user npm ci --production","sudo -u ec2-user pm2 start server.js --name ktb-backend-cluster --instances 2 --exec-mode cluster --max-memory-restart 700M --node-args=--max-old-space-size=600","sudo -u ec2-user pm2 save","sudo -u ec2-user pm2 list"]' \
             --timeout-seconds 600 \
             --region ${{ env.AWS_REGION }}
         done
