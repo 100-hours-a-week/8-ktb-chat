@@ -508,10 +508,9 @@ export const useChatRoom = () => {
   }, [router.query.room, setupRoom, setConnected, currentUser, isInitialized, setError]);
 
   // Component initialization and cleanup
+  /*
   useEffect(() => {
     const initializeChat = async () => {
-      if (initializingRef.current) return;
-      
       const user = authService.getCurrentUser();
       if (!user) {
         router.replace('/?redirect=' + router.asPath);
@@ -525,14 +524,11 @@ export const useChatRoom = () => {
       // 채팅방이 있을 때만 초기화 진행
       if (!isInitialized && router.query.room) {
         try {
-          initializingRef.current = true;
           console.log('Initializing chat room...');
           await setupRoom();
         } catch (error) {
           console.error('Chat initialization error:', error);
           setError('채팅방 초기화에 실패했습니다.');
-        } finally {
-          initializingRef.current = false;
         }
       }
     };
@@ -569,6 +565,50 @@ export const useChatRoom = () => {
       }
     };
   }, [router.isReady, router.query.room, cleanup, setupRoom, currentUser, isInitialized, setError]);
+  */
+
+  // 사용자 인증 및 상태 설정
+  useEffect(() => {
+    const user = authService.getCurrentUser();
+    if (!user) {
+      router.replace('/?redirect=' + router.asPath);
+    } else if (!currentUser) {
+      setCurrentUser(user);
+    }
+  }, [router, currentUser]);
+
+  // 채팅방 초기화 (사용자 정보가 있을 때만 실행)
+  useEffect(() => {
+    if (currentUser && router.isReady && router.query.room && !isInitialized) {
+      setupRoom().catch(error => {
+        console.error('Chat initialization failed:', error);
+        setError(error.message || '채팅방 초기화에 실패했습니다.');
+      });
+    }
+  }, [currentUser, router.isReady, router.query.room, setupRoom, isInitialized, setError]);
+
+  // 컴포넌트 unmount 및 라우터 변경 시 cleanup
+  useEffect(() => {
+    const handleRouteChange = () => {
+      if (socketRef.current) {
+        console.log('Router changed, cleaning up...');
+        cleanup('manual');
+      }
+    };
+
+    router.events.on('routeChangeStart', handleRouteChange);
+
+    return () => {
+      console.log('ChatRoom unmounting, cleaning up...');
+      cleanup('unmount');
+      router.events.off('routeChangeStart', handleRouteChange);
+
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
+    };
+  }, [cleanup, router.events, socketRef]);
 
   // File handling hook
   const {

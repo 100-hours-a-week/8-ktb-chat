@@ -348,11 +348,10 @@ export const useRoomHandling = (
 
     const setupPromise = (async () => {
       try {
-        if (initializingRef.current || setupCompleteRef.current) {
+        if (setupCompleteRef.current) {
           return;
         }
 
-        initializingRef.current = true;
         setLoading(true);
         setError(null);
         messageRetryCountRef.current = 0;
@@ -429,7 +428,7 @@ export const useRoomHandling = (
       } finally {
         if (mountedRef.current) {
           setLoading(false);
-          initializingRef.current = false;
+          setupCompleteRef.current = false;
         }
         
         clearAllTimeouts();
@@ -442,7 +441,6 @@ export const useRoomHandling = (
   }, [
     router.query.room,
     currentUser,
-    initializingRef,
     setupCompleteRef,
     mountedRef,
     setupSocket,
