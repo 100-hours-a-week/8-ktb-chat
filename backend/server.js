@@ -226,4 +226,4 @@ const startServer = async () => {
 
 startServer();
 
-module.exports = { app, server };startServer();
+module.exports = { app, server };
