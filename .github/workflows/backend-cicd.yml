@@ -159,6 +159,9 @@ jobs:
           cat << 'EOF' > /tmp/ktb-new/backend/.env
           ${{ secrets.ENV_BACKEND_DEV }}
           S3_BUCKET_NAME=pumati-loadtest
+          AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION=ap-northeast-2
           EOF
           echo "✅ .env 파일 생성 완료"
           
