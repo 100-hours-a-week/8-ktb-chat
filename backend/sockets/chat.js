@@ -1005,6 +1005,7 @@ module.exports = async function(io) {
     const messageId = `${aiName}-${Date.now()}`;
     let accumulatedContent = '';
     const timestamp = new Date();
+    let isCompleted = false; // 완료 콜백 중복 실행 방지 플래그
 
     // 이미 같은 AI가 같은 방에서 스트리밍 중인지 확인
     const existingStream = Array.from(streamingSessions.values())
@@ -1087,6 +1088,9 @@ module.exports = async function(io) {
           });
         },
         onComplete: async (finalContent) => {
+          if (isCompleted) return; // 이미 완료 처리된 경우 무시
+          isCompleted = true;
+
           try {
             // AI 메시지 저장
             const aiMessage = await Message.create({
