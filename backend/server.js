@@ -22,8 +22,7 @@ const mongooseOptions = {
   minPoolSize: 5,           // 최소 연결 수 (기본값: 0)
   maxIdleTimeMS: 30000,     // 유휴 연결 유지 시간 (30초)
   
-  // 버퍼링 설정
-  bufferMaxEntries: 0,      // 연결 실패 시 버퍼링 비활성화
+  // 버퍼링 설정 (bufferMaxEntries는 최신 MongoDB 드라이버에서 지원되지 않음)
   bufferCommands: false,    // 연결 실패 시 명령 버퍼링 비활성화
   
   // 타임아웃 설정
