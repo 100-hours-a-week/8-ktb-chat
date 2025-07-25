@@ -308,45 +308,14 @@ class FileService {
 
     const baseUrl = process.env.NEXT_PUBLIC_API_URL || '';
     const endpoint = forPreview ? 'view' : 'download';
-    return `${baseUrl}/api/files/${endpoint}/${filename}`;
+    return `${baseUrl}/api/files/${endpoint}/${encodeURIComponent(filename)}`;
   }
 
-  getPreviewUrl(file, withAuth = true) {
+  getPreviewUrl(file) {
     if (!file?.filename) return '';
-  
-    const apiBase = process.env.NEXT_PUBLIC_API_URL || '';
-    // Ensure filename is properly encoded for URL
-    const encodedFilename = encodeURIComponent(file.filename);
-    const baseUrl = `${apiBase}/api/files/view/${encodedFilename}`;
-  
-    if (!withAuth) return baseUrl;
-  
-    const user = authService.getCurrentUser();
-    if (!user?.token || !user?.sessionId) return baseUrl;
-  
-    try {
-      // URL 객체 생성 전 프로토콜 확인 및 추가
-      let fullUrl;
-      if (baseUrl.startsWith('http')) {
-        fullUrl = new URL(baseUrl);
-      } else {
-        // 상대 경로인 경우, window.location.origin을 사용하여 절대 경로로 변환
-        const origin = typeof window !== 'undefined' ? window.location.origin : '';
-        fullUrl = new URL(baseUrl, origin);
-      }
-      
-      fullUrl.searchParams.append('token', user.token);
-      fullUrl.searchParams.append('sessionId', user.sessionId);
-  
-      return fullUrl.toString();
-    } catch (error) {
-      console.error('Error constructing preview URL:', {
-        baseUrl,
-        error,
-      });
-      // URL 생성 실패 시 기본 URL 반환
-      return baseUrl;
-    }
+    
+    const baseUrl = process.env.NEXT_PUBLIC_API_URL || '';
+    return `${baseUrl}/api/files/view/${encodeURIComponent(file.filename)}`;
   }
 
   getFileType(filename) {
