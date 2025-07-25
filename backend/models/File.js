@@ -54,15 +54,7 @@ const FileSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  data: {
-    type: String,
-    required: false // Base64 인코딩된 파일 데이터
-  },
-  gridfsId: {
-    type: mongoose.Schema.Types.ObjectId,
-    required: false,
-    index: true
-  },
+  // Base64 데이터 필드 제거 - 로컬 파일시스템 사용
   user: { 
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -73,27 +65,35 @@ const FileSchema = new mongoose.Schema({
     type: Date, 
     default: Date.now,
     index: true
+  },
+  metadata: {
+    hash: String,
+    encoding: String,
+    uploadIp: String,
+    userAgent: String
   }
 }, {
-  timestamps: true,
-  toJSON: { getters: true },
-  toObject: { getters: true }
+  timestamps: true
 });
 
-// 복합 인덱스
+// 인덱스 설정
+FileSchema.index({ user: 1, uploadDate: -1 });
 FileSchema.index({ filename: 1, user: 1 }, { unique: true });
 
-// 파일 삭제 전 처리
-FileSchema.pre('remove', async function(next) {
+// 파일 삭제 시 실제 파일도 삭제하는 미들웨어
+FileSchema.pre('deleteOne', { document: true, query: false }, async function(next) {
   try {
     const fs = require('fs').promises;
-    if (this.path) {
+    if (this.path && !this.path.startsWith('mongodb://')) {
+      // 로컬 파일시스템의 파일 삭제
       await fs.unlink(this.path);
+      console.log('Local file deleted:', this.path);
     }
     next();
   } catch (error) {
     console.error('File removal error:', error);
-    next(error);
+    // 파일 삭제 실패해도 DB 레코드는 삭제하도록 next() 호출
+    next();
   }
 });
 
@@ -143,11 +143,38 @@ FileSchema.methods.getContentDisposition = function(type = 'attachment') {
 FileSchema.methods.isPreviewable = function() {
   const previewableTypes = [
     'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-    'video/mp4', 'video/webm',
-    'audio/mpeg', 'audio/wav',
-    'application/pdf'
+    'video/mp4', 'video/webm', 'video/quicktime',
+    'audio/mpeg', 'audio/wav', 'audio/ogg',
+    'application/pdf', 'text/plain'
   ];
   return previewableTypes.includes(this.mimetype);
+};
+
+// 파일 크기를 읽기 쉬운 형태로 반환하는 메서드
+FileSchema.methods.getFormattedSize = function() {
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = this.size;
+  let unitIndex = 0;
+  
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex++;
+  }
+  
+  return `${size.toFixed(1)} ${units[unitIndex]}`;
+};
+
+// 파일 타입 카테고리 반환 메서드
+FileSchema.methods.getFileCategory = function() {
+  const mimetype = this.mimetype;
+  
+  if (mimetype.startsWith('image/')) return 'image';
+  if (mimetype.startsWith('video/')) return 'video';
+  if (mimetype.startsWith('audio/')) return 'audio';
+  if (mimetype.startsWith('application/pdf')) return 'document';
+  if (mimetype.startsWith('text/')) return 'text';
+  
+  return 'other';
 };
 
 module.exports = mongoose.model('File', FileSchema);

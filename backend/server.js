@@ -83,13 +83,49 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// 정적 파일 제공
+// 정적 파일 제공 (uploads 디렉토리)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
-  setHeaders: (res, path) => {
-    // 파일 캐싱 헤더 설정
-    res.set('Cache-Control', 'public, max-age=31536000'); // 1년
+  setHeaders: (res, filePath, stat) => {
+    // CORS 헤더 설정
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, x-auth-token, x-session-id');
+    
+    // 보안 헤더 설정
     res.set('X-Content-Type-Options', 'nosniff');
-  }
+    res.set('X-Frame-Options', 'DENY');
+    res.set('X-XSS-Protection', '1; mode=block');
+    
+    // 파일 타입별 캐시 정책
+    const ext = path.extname(filePath).toLowerCase();
+    if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.ico'].includes(ext)) {
+      // 이미지 파일: 1년 캐시
+      res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    } else if (['.mp4', '.webm', '.mov', '.mp3', '.wav', '.ogg'].includes(ext)) {
+      // 미디어 파일: 1개월 캐시
+      res.set('Cache-Control', 'public, max-age=2592000');
+    } else {
+      // 기타 파일: 1일 캐시
+      res.set('Cache-Control', 'public, max-age=86400');
+    }
+    
+    // Last-Modified 헤더 설정
+    res.set('Last-Modified', stat.mtime.toUTCString());
+  },
+  // 파일이 없을 때 404 에러 반환
+  fallthrough: false,
+  // dotfiles 무시
+  dotfiles: 'ignore',
+  // ETag 생성
+  etag: true,
+  // 파일 확장자 처리
+  extensions: false,
+  // 인덱스 파일 무시
+  index: false,
+  // 대소문자 구분하지 않음
+  caseSensitive: false,
+  // 최대 age 설정
+  maxAge: 0 // setHeaders에서 개별 설정
 }));
 
 // 루트 헬스체크 엔드포인트 (ALB용)

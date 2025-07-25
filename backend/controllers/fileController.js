@@ -149,14 +149,15 @@ exports.uploadFile = async (req, res) => {
       });
     }
 
-    console.log('📁 Starting file hash generation...');
+    console.log('📁 Starting file processing...');
+    
     // 파일 해시 생성 (중복 체크용)
     try {
       const fileBuffer = await fsPromises.readFile(req.file.path);
       const fileHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
       console.log('✅ File hash generated:', fileHash);
 
-      // 중복 파일 확인
+      // 중복 파일 확인 (filename으로 확인)
       const duplicateFile = await File.findOne({ 
         user: req.user.id,
         size: req.file.size,
@@ -197,61 +198,37 @@ exports.uploadFile = async (req, res) => {
       // 해시 에러는 무시하고 계속 진행
     }
 
-    // 새 파일 저장 (Base64 MongoDB 직접 저장)
-    const safeFilename = generateSafeFilename(req.file.originalname);
+    // 새 파일 저장 (로컬 파일시스템 사용)
+    console.log('🚀 Saving file to local filesystem...');
     
-    console.log('🚀 Starting Base64 MongoDB upload:', {
-      originalname: req.file.originalname,
-      safeFilename,
-      tempPath: req.file.path,
-      mimetype: req.file.mimetype,
-      size: req.file.size
+    // 파일이 올바른 위치에 저장되었는지 확인
+    const uploadedFilePath = req.file.path;
+    const filename = req.file.filename;
+    
+    console.log('File saved at:', {
+      filename: filename,
+      path: uploadedFilePath,
+      exists: await fsPromises.access(uploadedFilePath).then(() => true).catch(() => false)
     });
 
-    // 파일을 Base64로 인코딩
-    let fileBuffer, base64Data;
-    try {
-      console.log('📖 Reading and encoding file...');
-      fileBuffer = await fsPromises.readFile(req.file.path);
-      base64Data = fileBuffer.toString('base64');
-      console.log('✅ File encoded to Base64, size:', base64Data.length);
-    } catch (encodeError) {
-      console.error('❌ File encoding failed:', encodeError);
-      throw new Error(`파일 인코딩 실패: ${encodeError.message}`);
-    }
+    // 데이터베이스에 파일 메타데이터만 저장 (실제 파일은 로컬에 저장됨)
+    const file = new File({
+      filename: filename,
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      path: uploadedFilePath, // 로컬 파일 경로 저장
+      user: req.user.id,
+      uploadDate: new Date()
+    });
 
-    // MongoDB에 파일 정보 저장
-    let file;
-    try {
-      console.log('💾 Saving to MongoDB...');
-      file = new File({
-        filename: safeFilename,
-        originalname: req.file.originalname || 'unknown',
-        mimetype: req.file.mimetype || 'application/octet-stream',
-        size: req.file.size || fileBuffer.length,
-        user: req.user.id,
-        path: `mongodb://${safeFilename}`, // MongoDB 저장 표시
-        data: base64Data // Base64 데이터 직접 저장
-      });
-
-      await file.save();
-      console.log('✅ File saved to MongoDB successfully:', {
-        fileId: file._id,
-        filename: file.filename,
-        dataSize: base64Data.length
-      });
-    } catch (dbError) {
-      console.error('❌ MongoDB save failed:', dbError);
-      throw new Error(`데이터베이스 저장 실패: ${dbError.message}`);
-    }
-    
-    // 로컬 임시 파일 삭제
-    try {
-      await fsPromises.unlink(req.file.path);
-      console.log('✅ Temporary file cleaned up');
-    } catch (cleanupError) {
-      console.warn('⚠️ Failed to cleanup temporary file:', cleanupError.message);
-    }
+    await file.save();
+    console.log('✅ File metadata saved to database:', {
+      id: file._id,
+      filename: file.filename,
+      originalname: file.originalname,
+      size: file.size
+    });
 
     // 파일 업로드 완료 시 관련 캐시 무효화
     await CacheService.invalidateMultiple([
@@ -346,7 +323,6 @@ exports.downloadFile = async (req, res) => {
           });
         }
       } else {
-        // 메시지가 없고 소유자도 아닌 경우 접근 거부
         console.log('No message found and not owner for download:', { filename, userId: req.user.id });
         return res.status(403).json({ 
           success: false, 
@@ -355,34 +331,51 @@ exports.downloadFile = async (req, res) => {
       }
     }
 
-    console.log('Getting file info from MongoDB for download:', filename);
+    // 로컬 파일시스템에서 파일 확인
+    const filePath = file.path || path.join(uploadDir, filename);
+    
+    try {
+      await fsPromises.access(filePath, fs.constants.R_OK);
+    } catch (error) {
+      console.error('File not found on filesystem:', { filename, filePath });
+      return res.status(404).json({ 
+        success: false, 
+        message: '파일을 찾을 수 없습니다.' 
+      });
+    }
 
-    // MongoDB에서 파일 데이터 조회
-    const fileData = file.data;
+    console.log('Streaming file download from filesystem:', { 
+      filename, 
+      filePath,
+      contentType: file.mimetype
+    });
+
+    // 파일 정보 설정
     const contentType = file.mimetype || 'application/octet-stream';
     const originalName = file.originalname || filename;
-
-    // 파일 데이터를 버퍼로 변환
-    const fileBuffer = Buffer.from(fileData, 'base64');
-
-    console.log('Streaming file download from MongoDB:', { 
-      filename, 
-      contentType,
-      length: fileBuffer.length 
-    });
 
     // 다운로드용 응답 헤더 설정
     res.set({
       'Content-Type': contentType,
-      'Content-Length': fileBuffer.length,
       'Content-Disposition': `attachment; filename="${encodeURIComponent(originalName)}"`,
       'Cache-Control': 'private, no-cache, no-store, must-revalidate',
       'Pragma': 'no-cache',
       'Expires': '0'
     });
 
-    // 파일 스트림을 응답으로 전송
-    res.send(fileBuffer);
+    // 파일 스트림으로 응답
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(res);
+    
+    fileStream.on('error', (error) => {
+      console.error('File streaming error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ 
+          success: false, 
+          message: '파일 다운로드 중 오류가 발생했습니다.' 
+        });
+      }
+    });
 
   } catch (error) {
     console.error('DownloadFile error:', {
@@ -424,15 +417,14 @@ exports.viewFile = async (req, res) => {
         });
         
         if (!room) {
-          console.log('Access denied for file:', { filename, userId: req.user.id });
+          console.log('Access denied for file view:', { filename, userId: req.user.id });
           return res.status(403).json({ 
             success: false, 
             message: '파일에 접근할 권한이 없습니다.' 
           });
         }
       } else {
-        // 메시지가 없고 소유자도 아닌 경우 접근 거부
-        console.log('No message found and not owner:', { filename, userId: req.user.id });
+        console.log('No message found and not owner for view:', { filename, userId: req.user.id });
         return res.status(403).json({ 
           success: false, 
           message: '파일에 접근할 권한이 없습니다.' 
@@ -440,33 +432,50 @@ exports.viewFile = async (req, res) => {
       }
     }
 
-    console.log('Getting file info from MongoDB:', filename);
+    // 로컬 파일시스템에서 파일 확인
+    const filePath = file.path || path.join(uploadDir, filename);
+    
+    try {
+      await fsPromises.access(filePath, fs.constants.R_OK);
+    } catch (error) {
+      console.error('File not found on filesystem:', { filename, filePath });
+      return res.status(404).json({ 
+        success: false, 
+        message: '파일을 찾을 수 없습니다.' 
+      });
+    }
 
-    // MongoDB에서 파일 데이터 조회
-    const fileData = file.data;
+    console.log('Streaming file view from filesystem:', { 
+      filename, 
+      filePath,
+      contentType: file.mimetype
+    });
+
+    // 파일 정보 설정
     const contentType = file.mimetype || 'application/octet-stream';
     const originalName = file.originalname || filename;
 
-    // 파일 데이터를 버퍼로 변환
-    const fileBuffer = Buffer.from(fileData, 'base64');
-
-    console.log('Streaming file from MongoDB:', { 
-      filename, 
-      contentType,
-      length: fileBuffer.length 
-    });
-
-    // 응답 헤더 설정
+    // 미리보기용 응답 헤더 설정
     res.set({
       'Content-Type': contentType,
-      'Content-Length': fileBuffer.length,
       'Content-Disposition': `inline; filename="${encodeURIComponent(originalName)}"`,
       'Cache-Control': 'public, max-age=31536000, immutable', // 1년 캐시
       'Last-Modified': new Date(file.uploadDate).toUTCString()
     });
 
-    // 파일 스트림을 응답으로 전송
-    res.send(fileBuffer);
+    // 파일 스트림으로 응답
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(res);
+    
+    fileStream.on('error', (error) => {
+      console.error('File streaming error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ 
+          success: false, 
+          message: '파일 보기 중 오류가 발생했습니다.' 
+        });
+      }
+    });
 
   } catch (error) {
     console.error('ViewFile error:', {

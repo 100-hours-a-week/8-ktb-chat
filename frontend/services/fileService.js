@@ -324,11 +324,61 @@ class FileService {
     return `${baseUrl}/api/files/${endpoint}/${encodeURIComponent(filename)}`;
   }
 
-  getPreviewUrl(file) {
+  getPreviewUrl(file, withAuth = false) {
     if (!file?.filename) return '';
     
     const baseUrl = process.env.NEXT_PUBLIC_API_URL || '';
-    return `${baseUrl}/api/files/view/${encodeURIComponent(file.filename)}`;
+    
+    if (withAuth) {
+      // 인증이 필요한 경우 API 엔드포인트 사용
+      return `${baseUrl}/api/files/view/${encodeURIComponent(file.filename)}`;
+    } else {
+      // 정적 파일 서빙 URL (캐시 효율적)
+      return `${baseUrl}/uploads/${encodeURIComponent(file.filename)}`;
+    }
+  }
+
+  // 이미지 로드 시도 (fallback 지원)
+  async loadImageWithFallback(file) {
+    if (!file?.filename) {
+      throw new Error('파일 정보가 없습니다.');
+    }
+
+    const baseUrl = process.env.NEXT_PUBLIC_API_URL || '';
+    
+    // 첫 번째 시도: 정적 파일 서빙 (빠름)
+    const staticUrl = `${baseUrl}/uploads/${encodeURIComponent(file.filename)}`;
+    
+    try {
+      const response = await fetch(staticUrl, { method: 'HEAD' });
+      if (response.ok) {
+        return staticUrl;
+      }
+    } catch (error) {
+      console.debug('Static file not accessible, trying API endpoint:', error.message);
+    }
+    
+    // 두 번째 시도: API 엔드포인트 (인증 필요)
+    const user = authService.getCurrentUser();
+    if (user?.token && user?.sessionId) {
+      const apiUrl = `${baseUrl}/api/files/view/${encodeURIComponent(file.filename)}`;
+      try {
+        const response = await fetch(apiUrl, {
+          method: 'HEAD',
+          headers: {
+            'x-auth-token': user.token,
+            'x-session-id': user.sessionId
+          }
+        });
+        if (response.ok) {
+          return `${apiUrl}?token=${encodeURIComponent(user.token)}&sessionId=${encodeURIComponent(user.sessionId)}`;
+        }
+      } catch (error) {
+        console.error('API endpoint also failed:', error.message);
+      }
+    }
+    
+    throw new Error('파일에 접근할 수 없습니다.');
   }
 
   getFileType(filename) {

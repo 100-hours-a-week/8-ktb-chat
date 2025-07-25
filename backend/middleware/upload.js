@@ -7,11 +7,32 @@ const crypto = require('crypto');
 // uploads 디렉토리 절대 경로 설정
 const uploadDir = path.join(__dirname, '../uploads');
 
-// uploads 디렉토리 생성 및 권한 설정
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-  fs.chmodSync(uploadDir, '0755');
-}
+// uploads 디렉토리 생성 및 권한 설정 (동기적으로 확실히 생성)
+const ensureUploadDir = () => {
+  try {
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true, mode: 0o755 });
+      console.log('📁 Upload directory created:', uploadDir);
+    }
+    
+    // 디렉토리 권한 확인 및 설정
+    const stats = fs.statSync(uploadDir);
+    if (!stats.isDirectory()) {
+      throw new Error('Upload path exists but is not a directory');
+    }
+    
+    // 쓰기 권한 확인
+    fs.accessSync(uploadDir, fs.constants.W_OK);
+    console.log('✅ Upload directory is writable:', uploadDir);
+    
+  } catch (error) {
+    console.error('❌ Upload directory setup failed:', error);
+    throw new Error(`Upload directory setup failed: ${error.message}`);
+  }
+};
+
+// 초기화 시 디렉토리 생성
+ensureUploadDir();
 
 // MIME 타입과 확장자 매핑
 const ALLOWED_TYPES = {
@@ -40,10 +61,13 @@ const FILE_SIZE_LIMITS = {
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
+    try {
+      // 매번 디렉토리 존재 확인
+      ensureUploadDir();
+      cb(null, uploadDir);
+    } catch (error) {
+      cb(error);
     }
-    cb(null, uploadDir);
   },
   filename: function (req, file, cb) {
     try {
@@ -67,7 +91,17 @@ const storage = multer.diskStorage({
         return cb(new Error('지원하지 않는 파일 확장자입니다.'));
       }
 
-      cb(null, safeFilename);
+      // 파일명 중복 확인
+      const fullPath = path.join(uploadDir, safeFilename);
+      if (fs.existsSync(fullPath)) {
+        // 중복 시 다시 생성
+        const newRandomString = crypto.randomBytes(12).toString('hex');
+        const newSafeFilename = `${timestamp}_${newRandomString}${ext}`;
+        cb(null, newSafeFilename);
+      } else {
+        cb(null, safeFilename);
+      }
+      
     } catch (error) {
       console.error('Filename processing error:', error);
       cb(new Error('파일명 처리 중 오류가 발생했습니다.'));

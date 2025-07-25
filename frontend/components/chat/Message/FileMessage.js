@@ -53,16 +53,35 @@ const FileMessage = ({
 }) => {
   const [error, setError] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
+  const [imageLoading, setImageLoading] = useState(true);
 
   useEffect(() => {
-    if (msg?.file) {
-      const url = fileService.getPreviewUrl(msg.file, true);
-      setPreviewUrl(url);
-      console.debug('Preview URL generated:', {
-        filename: msg.file.filename,
-        url
-      });
-    }
+    const loadImage = async () => {
+      if (msg?.file) {
+        setImageLoading(true);
+        setError(null);
+        
+        try {
+          // fallback 로직을 사용하여 이미지 URL 획득
+          const url = await fileService.loadImageWithFallback(msg.file);
+          setPreviewUrl(url);
+          console.debug('Image URL loaded:', {
+            filename: msg.file.filename,
+            url
+          });
+        } catch (loadError) {
+          console.error('Failed to load image URL:', loadError);
+          setError(loadError.message || '이미지를 불러올 수 없습니다.');
+          // fallback으로 기본 API URL 사용
+          const defaultUrl = fileService.getPreviewUrl(msg.file, true);
+          setPreviewUrl(defaultUrl);
+        } finally {
+          setImageLoading(false);
+        }
+      }
+    };
+
+    loadImage();
   }, [msg?.file]);
 
   if (!msg?.file) {
@@ -191,12 +210,22 @@ const FileMessage = ({
         );
       }
 
-      const user = authService.getCurrentUser();
-      if (!user?.token || !user?.sessionId) {
-        throw new Error('인증 정보가 없습니다.');
+      if (imageLoading) {
+        return (
+          <div className="flex items-center justify-center h-full bg-gray-100">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+          </div>
+        );
       }
 
-      const previewUrl = fileService.getPreviewUrl(msg.file, true);
+      if (error) {
+        return (
+          <div className="flex flex-col items-center justify-center h-full bg-gray-100 p-4">
+            <Image className="w-8 h-8 text-gray-400 mb-2" />
+            <span className="text-xs text-red-500 text-center">{error}</span>
+          </div>
+        );
+      }
 
       return (
         <div className="bg-transparent-pattern">
@@ -204,14 +233,30 @@ const FileMessage = ({
             src={previewUrl}
             alt={originalname}
             className="object-cover rounded-sm"
-            onLoad={() => {
+            onLoad={(e) => {
               console.debug('Image loaded successfully:', originalname);
+              setError(null);
             }}
-            onError={(e) => {
-              console.error('Image load error:', {
-                error: e.error,
-                originalname
-              });
+            onError={async (e) => {
+              console.error('Image load error for URL:', previewUrl);
+              
+              // 첫 번째 에러 시 인증된 URL로 재시도
+              if (!previewUrl.includes('token=')) {
+                try {
+                  const user = authService.getCurrentUser();
+                  if (user?.token && user?.sessionId) {
+                    const apiUrl = fileService.getFileUrl(msg.file.filename, true);
+                    const authenticatedUrl = `${apiUrl}?token=${encodeURIComponent(user.token)}&sessionId=${encodeURIComponent(user.sessionId)}`;
+                    e.target.src = authenticatedUrl;
+                    setPreviewUrl(authenticatedUrl);
+                    return; // 재시도하므로 에러 처리하지 않음
+                  }
+                } catch (retryError) {
+                  console.error('Retry with auth failed:', retryError);
+                }
+              }
+              
+              // 최종 실패 시 placeholder 이미지
               e.target.onerror = null; 
               e.target.src = '/images/placeholder-image.png';
               setError('이미지를 불러올 수 없습니다.');
@@ -221,7 +266,7 @@ const FileMessage = ({
         </div>
       );
     } catch (error) {
-      console.error('Image preview error:', error);
+      console.error('Image preview render error:', error);
       setError(error.message || '이미지 미리보기를 불러올 수 없습니다.');
       return (
         <div className="flex items-center justify-center h-full bg-gray-100">
