@@ -244,9 +244,23 @@ exports.downloadFile = async (req, res) => {
   try {
     const { file, filePath } = await getFileFromRequest(req);
     
-    // 헤더 직접 생성 (캐싱 제거 - 메모리에서 더 빠름)
-    const fileInstance = new File(file);
-    const contentDisposition = fileInstance.getContentDisposition('attachment');
+    // Content-Disposition 헤더 생성 (직접 구현)
+    const encodeFilename = (filename) => {
+      try {
+        const encodedFilename = encodeURIComponent(filename)
+          .replace(/'/g, "%27")
+          .replace(/\(/g, "%28")
+          .replace(/\)/g, "%29")
+          .replace(/\*/g, "%2A");
+        
+        const legacy = filename.replace(/[^\x20-\x7E]/g, '');
+        return `attachment; filename="${legacy}"; filename*=UTF-8''${encodedFilename}`;
+      } catch (error) {
+        return `attachment; filename="${file.filename}"`;
+      }
+    };
+
+    const contentDisposition = encodeFilename(file.originalname || file.filename);
     
     // 헤더 설정 (직접)
     res.set({
@@ -284,17 +298,38 @@ exports.viewFile = async (req, res) => {
   try {
     const { file, filePath } = await getFileFromRequest(req);
 
-    // File 모델 인스턴스로 변환하여 메서드 사용
-    const fileInstance = new File(file);
-    if (!fileInstance.isPreviewable()) {
+    // 미리보기 가능한 파일 타입 확인 (직접 구현)
+    const previewableTypes = [
+      'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+      'video/mp4', 'video/webm',
+      'audio/mpeg', 'audio/wav',
+      'application/pdf'
+    ];
+    
+    if (!previewableTypes.includes(file.mimetype)) {
       return res.status(415).json({
         success: false,
         message: '미리보기를 지원하지 않는 파일 형식입니다.'
       });
     }
 
-    // 헤더 직접 생성 (더 빠름)
-    const contentDisposition = fileInstance.getContentDisposition('inline');
+    // Content-Disposition 헤더 생성 (직접 구현)
+    const encodeFilename = (filename) => {
+      try {
+        const encodedFilename = encodeURIComponent(filename)
+          .replace(/'/g, "%27")
+          .replace(/\(/g, "%28")
+          .replace(/\)/g, "%29")
+          .replace(/\*/g, "%2A");
+        
+        const legacy = filename.replace(/[^\x20-\x7E]/g, '');
+        return `inline; filename="${legacy}"; filename*=UTF-8''${encodedFilename}`;
+      } catch (error) {
+        return `inline; filename="${file.filename}"`;
+      }
+    };
+
+    const contentDisposition = encodeFilename(file.originalname || file.filename);
     const etag = `"${file.filename}-${file.size}"`;
     
     // 브라우저 캐시 확인 (If-None-Match)
