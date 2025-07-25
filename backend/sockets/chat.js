@@ -685,10 +685,22 @@ module.exports = async function(io) {
             }
 
             console.log('🔍 Looking up file in database:', fileData._id);
-            const file = await File.findOne({
-              _id: fileData._id,
-              user: socket.user.id
-            });
+            
+            // 파일 조회 시 더 엄격한 검증
+            let file;
+            try {
+              file = await File.findOne({
+                _id: fileData._id,
+                user: socket.user.id
+              });
+            } catch (dbError) {
+              console.error('❌ DATABASE ERROR during file lookup:', {
+                fileId: fileData._id,
+                userId: socket.user.id,
+                error: dbError.message
+              });
+              throw new Error('파일 조회 중 데이터베이스 오류가 발생했습니다.');
+            }
 
             if (!file) {
               console.error('❌ FILE NOT FOUND ERROR:', {
@@ -706,21 +718,22 @@ module.exports = async function(io) {
               size: file.size
             });
 
+            // 메시지 객체 생성 시 안전한 방식 사용
             message = new Message({
-              room,
+              room: room,
               sender: socket.user.id,
               type: 'file',
               file: file._id,
               content: content || '',
               timestamp: new Date(),
-              reactions: {},
-              metadata: {
-                fileType: file.mimetype,
-                fileSize: file.size,
-                originalName: file.originalname
-              }
+              reactions: new Map(),
+              metadata: new Map([
+                ['fileType', file.mimetype],
+                ['fileSize', file.size],
+                ['originalName', file.originalname]
+              ])
             });
-            console.log('✅ File message object created');
+            console.log('✅ File message object created successfully');
             break;
 
           case 'text':
@@ -748,24 +761,57 @@ module.exports = async function(io) {
         }
 
         console.log('💾 Saving message to database...');
-        await message.save();
-        console.log('✅ Message saved to database:', message._id);
+        let savedMessage;
+        try {
+          savedMessage = await message.save();
+          console.log('✅ Message saved to database:', savedMessage._id);
+        } catch (saveError) {
+          console.error('❌ MESSAGE SAVE ERROR:', {
+            error: saveError.message,
+            stack: saveError.stack,
+            messageType: message.type,
+            userId: socket.user.id
+          });
+          throw new Error('메시지 저장 중 오류가 발생했습니다.');
+        }
 
         console.log('📖 Populating message references...');
-        await message.populate([
-          { path: 'sender', select: 'name email profileImage' },
-          { path: 'file', select: 'filename originalname mimetype size' }
-        ]);
-        console.log('✅ Message populated');
+        try {
+          await savedMessage.populate([
+            { path: 'sender', select: 'name email profileImage' },
+            { path: 'file', select: 'filename originalname mimetype size' }
+          ]);
+          console.log('✅ Message populated successfully');
+        } catch (populateError) {
+          console.error('❌ MESSAGE POPULATE ERROR:', populateError);
+          // Populate 실패는 치명적이지 않으므로 계속 진행
+        }
 
         // 새 메시지 작성 시 해당 채팅방의 메시지 캐시 무효화
         console.log('🗑️ Invalidating cache...');
-        await CacheService.invalidateByTag(`room:${room}`);
-        console.log('✅ Cache invalidated');
+        try {
+          await CacheService.invalidateByTag(`room:${room}`);
+          console.log('✅ Cache invalidated');
+        } catch (cacheError) {
+          console.warn('⚠️ Cache invalidation failed:', cacheError.message);
+          // 캐시 실패는 치명적이지 않으므로 계속 진행
+        }
 
         console.log('📡 Broadcasting message to room...');
-        io.to(room).emit('message', message);
-        console.log('✅ Message broadcasted');
+        try {
+          // 브로드캐스트할 메시지 객체 준비
+          const messageToSend = savedMessage.toObject ? savedMessage.toObject() : savedMessage;
+          io.to(room).emit('message', messageToSend);
+          console.log('✅ Message broadcasted successfully to room:', room);
+        } catch (broadcastError) {
+          console.error('❌ MESSAGE BROADCAST ERROR:', {
+            error: broadcastError.message,
+            room: room,
+            messageId: savedMessage._id
+          });
+          // 브로드캐스트 실패는 심각한 문제이므로 에러 발생
+          throw new Error('메시지 전송 중 오류가 발생했습니다.');
+        }
 
         // AI 멘션이 있는 경우 AI 응답 생성 (중복 방지)
         if (aiMentions.length > 0) {
@@ -797,8 +843,8 @@ module.exports = async function(io) {
         console.log('✅ Last activity updated');
 
         console.log('=== CHAT MESSAGE SUCCESS ===', {
-          messageId: message._id,
-          type: message.type,
+          messageId: savedMessage._id,
+          type: savedMessage.type,
           room,
           timestamp: new Date().toISOString()
         });

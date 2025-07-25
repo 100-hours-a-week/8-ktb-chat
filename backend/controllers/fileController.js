@@ -354,7 +354,7 @@ exports.downloadFile = async (req, res) => {
     const gridfsFile = await getFileInfoFromGridFS(filename);
     
     // GridFS에서 파일 스트림 생성
-    const fileStream = getFileStreamFromGridFS(filename);
+    const fileStream = await getFileStreamFromGridFS(filename);
     
     console.log('Streaming file download from GridFS:', { 
       filename, 
@@ -447,7 +447,7 @@ exports.viewFile = async (req, res) => {
     const gridfsFile = await getFileInfoFromGridFS(filename);
     
     // GridFS에서 파일 스트림 생성
-    const fileStream = getFileStreamFromGridFS(filename);
+    const fileStream = await getFileStreamFromGridFS(filename);
     
     console.log('Streaming file from GridFS:', { 
       filename, 

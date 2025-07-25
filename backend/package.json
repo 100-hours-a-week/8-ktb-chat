@@ -26,8 +26,7 @@
     "pdf-parse": "^1.1.1",
     "redis": "^4.6.7",
     "socket.io": "^4.7.2",
-    "@socket.io/redis-adapter": "^8.3.0",
-    "gridfs-stream": "^1.1.1"
+    "@socket.io/redis-adapter": "^8.3.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
