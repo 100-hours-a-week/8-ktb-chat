@@ -153,7 +153,9 @@ export const useMessageHandling = (socketRef, currentUser, router, handleSession
          console.log('✅ Upload response received:', {
            success: uploadResponse?.success,
            hasData: !!uploadResponse?.data,
+           hasFile: !!uploadResponse?.data?.file,
            fileId: uploadResponse?.data?.file?._id,
+           filename: uploadResponse?.data?.file?.filename,
            error: uploadResponse?.error || uploadResponse?.message
          });
 
@@ -166,6 +168,18 @@ export const useMessageHandling = (socketRef, currentUser, router, handleSession
            throw new Error(uploadResponse.message || '파일 업로드에 실패했습니다.');
          }
 
+         // 안전한 파일 데이터 추출
+         const fileData = uploadResponse?.data?.file;
+         if (!fileData || !fileData._id || !fileData.filename) {
+           console.error('❌ Invalid file data in upload response:', {
+             hasFileData: !!fileData,
+             fileId: fileData?._id,
+             filename: fileData?.filename,
+             fullResponse: uploadResponse
+           });
+           throw new Error('업로드 응답에 유효하지 않은 파일 데이터가 포함되어 있습니다.');
+         }
+
          console.log('📡 Emitting file message to socket...');
          const messagePayload = {
            room: roomId,
@@ -173,11 +187,11 @@ export const useMessageHandling = (socketRef, currentUser, router, handleSession
            content: messageData.content || '',
            requestId: generateRequestId(),
            fileData: {
-             _id: uploadResponse.data.file._id,
-             filename: uploadResponse.data.file.filename,
-             originalname: uploadResponse.data.file.originalname,
-             mimetype: uploadResponse.data.file.mimetype,
-             size: uploadResponse.data.file.size
+             _id: fileData._id,
+             filename: fileData.filename,
+             originalname: fileData.originalname,
+             mimetype: fileData.mimetype,
+             size: fileData.size
            }
          };
 
