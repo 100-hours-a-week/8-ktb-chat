@@ -2,6 +2,11 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Toast } from '../components/Toast';
 import fileService from '../services/fileService';
 
+// 고유 ID 생성 함수
+const generateRequestId = () => {
+  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+};
+
 export const useFileHandling = (socketRef, currentUser, router, handleSessionError) => {
   const [filePreview, setFilePreview] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -40,6 +45,7 @@ export const useFileHandling = (socketRef, currentUser, router, handleSessionErr
         room: roomId,
         type: 'file',
         content: content,
+        requestId: generateRequestId(),
         fileData: {
           _id: uploadResponse.data.file._id,
           filename: uploadResponse.data.file.filename,

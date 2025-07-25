@@ -2,6 +2,11 @@ import { useState, useCallback } from 'react';
 import { Toast } from '../components/Toast';
 import fileService from '../services/fileService';
 
+// 고유 ID 생성 함수
+const generateRequestId = () => {
+  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+};
+
 export const useMessageHandling = (socketRef, currentUser, router, handleSessionError, messages = []) => {
  const [message, setMessage] = useState('');
  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -123,6 +128,7 @@ export const useMessageHandling = (socketRef, currentUser, router, handleSession
          room: roomId,
          type: 'file',
          content: messageData.content || '',
+         requestId: generateRequestId(),
          fileData: {
            _id: uploadResponse.data.file._id,
            filename: uploadResponse.data.file.filename,
@@ -141,7 +147,8 @@ export const useMessageHandling = (socketRef, currentUser, router, handleSession
        socketRef.current.emit('chatMessage', {
          room: roomId,
          type: 'text',
-         content: messageData.content.trim()
+         content: messageData.content.trim(),
+         requestId: generateRequestId()
        });
 
        setMessage('');

@@ -566,27 +566,27 @@ module.exports = async function(io) {
           throw new Error('메시지 데이터가 없습니다.');
         }
 
-        const { room, type, content, fileData } = messageData;
+        const { room, type, content, fileData, requestId } = messageData;
 
         if (!room) {
           throw new Error('채팅방 정보가 없습니다.');
         }
 
-        // 메시지 중복 처리 방지 (시간 기반이 아닌 내용 기반)
-        const messageContent = content?.trim() || messageData.msg?.trim() || '';
-        const messageHash = `${socket.user.id}:${room}:${messageContent}:${type}`;
-        
-        // 최근 3초 내에 같은 내용의 메시지가 있는지 확인
-        if (processedMessages.has(messageHash)) {
-          console.log('Duplicate message prevented for user:', socket.user.id, 'content:', messageContent.substring(0, 50));
-          return;
+        // 요청 ID 기반 중복 방지 (더 정확함)
+        if (requestId) {
+          const requestKey = `${socket.user.id}:${requestId}`;
+          if (processedMessages.has(requestKey)) {
+            console.log('Duplicate request prevented:', requestKey);
+            return;
+          }
+          processedMessages.set(requestKey, true);
+          // 5분 후 요청 ID 제거 (충분한 시간)
+          setTimeout(() => {
+            processedMessages.delete(requestKey);
+          }, 300000);
+        } else {
+          console.warn('Message received without requestId from user:', socket.user.id);
         }
-        
-        processedMessages.set(messageHash, true);
-        // 3초 후 해시 제거 (짧은 시간 내 중복만 방지)
-        setTimeout(() => {
-          processedMessages.delete(messageHash);
-        }, 3000);
 
         // 채팅방 권한 확인
         const chatRoom = await Room.findOne({
