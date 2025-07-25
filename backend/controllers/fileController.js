@@ -175,20 +175,24 @@ exports.uploadFile = async (req, res) => {
         await fsPromises.unlink(req.file.path);
         console.log('✅ Duplicate file handled, returning existing file');
         
-        return res.json({
+        // 안전한 중복 파일 응답
+        const safeResponse = {
           success: true,
           message: '파일이 업로드되었습니다.',
           data: {
             file: {
               _id: duplicateFile._id,
-              filename: duplicateFile.filename,
-              originalname: duplicateFile.originalname,
-              mimetype: duplicateFile.mimetype,
-              size: duplicateFile.size,
-              uploadDate: duplicateFile.uploadDate
+              filename: duplicateFile.filename || 'unknown',
+              originalname: duplicateFile.originalname || 'unknown',
+              mimetype: duplicateFile.mimetype || 'application/octet-stream',
+              size: duplicateFile.size || 0,
+              uploadDate: duplicateFile.uploadDate || new Date()
             }
           }
-        });
+        };
+        
+        console.log('Sending duplicate file response:', safeResponse);
+        return res.json(safeResponse);
       }
     } catch (hashError) {
       console.error('❌ FILE HASH ERROR:', {
@@ -207,40 +211,70 @@ exports.uploadFile = async (req, res) => {
       safeFilename,
       tempPath: req.file.path,
       mimetype: req.file.mimetype,
-      size: req.file.size
+      size: req.file.size,
+      hasReqFile: !!req.file,
+      reqFileKeys: req.file ? Object.keys(req.file) : 'no req.file'
     });
 
-    // 파일 버퍼 읽기
-    const fileBuffer = await fsPromises.readFile(req.file.path);
+    // 파일 버퍼 읽기 - 안전한 방식으로
+    let fileBuffer;
+    try {
+      console.log('📖 Reading file buffer from:', req.file.path);
+      fileBuffer = await fsPromises.readFile(req.file.path);
+      console.log('✅ File buffer read successfully, size:', fileBuffer.length);
+    } catch (bufferError) {
+      console.error('❌ File buffer read failed:', bufferError);
+      throw new Error(`파일 읽기 실패: ${bufferError.message}`);
+    }
 
-    // GridFS에 파일 업로드
-    const gridfsFile = await saveFileToGridFS({
-      filename: safeFilename,
-      originalname: req.file.originalname,
-      mimetype: req.file.mimetype,
-      buffer: fileBuffer
-    });
+    // GridFS에 파일 업로드 - 안전한 방식으로
+    let gridfsFile;
+    try {
+      console.log('🚀 Uploading to GridFS...');
+      gridfsFile = await saveFileToGridFS({
+        filename: safeFilename,
+        originalname: req.file.originalname || 'unknown',
+        mimetype: req.file.mimetype || 'application/octet-stream',
+        buffer: fileBuffer
+      });
+      console.log('✅ GridFS upload successful:', gridfsFile);
+    } catch (gridfsError) {
+      console.error('❌ GridFS upload failed:', gridfsError);
+      throw new Error(`GridFS 업로드 실패: ${gridfsError.message}`);
+    }
     
     console.log('✅ GridFS upload completed, creating database record...');
 
-    // 데이터베이스에 파일 정보 저장
-    const file = new File({
-      filename: safeFilename,
-      originalname: req.file.originalname,
-      mimetype: req.file.mimetype,
-      size: req.file.size,
-      user: req.user.id,
-      path: `gridfs://${safeFilename}`, // GridFS 경로 표시
-      gridfsId: gridfsFile._id // GridFS 파일 ID 저장
-    });
+    // 데이터베이스에 파일 정보 저장 - 안전한 방식으로
+    let file;
+    try {
+      file = new File({
+        filename: safeFilename,
+        originalname: req.file.originalname || 'unknown',
+        mimetype: req.file.mimetype || 'application/octet-stream',
+        size: req.file.size || fileBuffer.length,
+        user: req.user.id,
+        path: `gridfs://${safeFilename}`, // GridFS 경로 표시
+        gridfsId: gridfsFile._id // GridFS 파일 ID 저장
+      });
 
-    await file.save();
-    console.log('✅ Database record created successfully:', {
-      fileId: file._id,
-      filename: file.filename,
-      gridfsId: gridfsFile._id
-    });
-    
+      await file.save();
+      console.log('✅ Database record created successfully:', {
+        fileId: file._id,
+        filename: file.filename,
+        gridfsId: gridfsFile._id
+      });
+    } catch (dbError) {
+      console.error('❌ Database save failed:', dbError);
+      // GridFS에서 업로드된 파일 정리
+      try {
+        await deleteFileFromGridFS(safeFilename);
+      } catch (cleanupError) {
+        console.error('❌ GridFS cleanup failed:', cleanupError);
+      }
+      throw new Error(`데이터베이스 저장 실패: ${dbError.message}`);
+    }
+
     // 로컬 임시 파일 삭제
     try {
       await fsPromises.unlink(req.file.path);
@@ -257,35 +291,23 @@ exports.uploadFile = async (req, res) => {
     console.log('✅ Cache invalidated');
 
     console.log('=== FILE UPLOAD SUCCESS ===');
-    console.log('Sending response:', {
+    const finalResponse = {
       success: true,
       message: '파일이 업로드되었습니다.',
       data: {
         file: {
           _id: file._id,
-          filename: file.filename,
-          originalname: file.originalname,
-          mimetype: file.mimetype,
-          size: file.size,
-          uploadDate: file.uploadDate
+          filename: file.filename || 'unknown',
+          originalname: file.originalname || 'unknown',
+          mimetype: file.mimetype || 'application/octet-stream',
+          size: file.size || 0,
+          uploadDate: file.uploadDate || new Date()
         }
       }
-    });
-
-    res.json({
-      success: true,
-      message: '파일이 업로드되었습니다.',
-      data: {
-        file: {
-          _id: file._id,
-          filename: file.filename,
-          originalname: file.originalname,
-          mimetype: file.mimetype,
-          size: file.size,
-          uploadDate: file.uploadDate
-        }
-      }
-    });
+    };
+    
+    console.log('Sending final response:', finalResponse);
+    res.json(finalResponse);
 
   } catch (error) {
     console.error('=== FILE UPLOAD CRITICAL ERROR ===');
