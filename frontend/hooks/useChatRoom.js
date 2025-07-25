@@ -309,6 +309,14 @@ export const useChatRoom = () => {
 
     console.log('Setting up event listeners...');
 
+    // 기존 이벤트 리스너 제거 (중복 등록 방지)
+    socketRef.current.off('participantsUpdate');
+    socketRef.current.off('message');
+    socketRef.current.off('previousMessages');
+    socketRef.current.off('messageReactionUpdate');
+    socketRef.current.off('session_ended');
+    socketRef.current.off('error');
+
     // 참가자 업데이트 이벤트
     socketRef.current.on('participantsUpdate', (participants) => {
       if (!mountedRef.current) return;
