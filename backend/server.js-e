@@ -132,21 +132,10 @@ const setupRedisAdapter = async () => {
         url: `redis://${redisHost}:${redisPort}`,
         password: redisPassword,
         socket: {
-          reconnectStrategy: (retries) => {
-            if (retries > 50) {
-              console.error('Redis Pub/Sub: Max reconnection attempts reached. Shutting down...');
-              process.exit(1); // PM2와 같은 프로세스 매니저가 재시작하도록 유도
-            }
-            const delay = Math.min(retries * 200, 10000); // 최대 10초까지 딜레이 증가
-            console.log(`Redis Pub/Sub: Reconnection attempt ${retries + 1}, retrying in ${delay}ms`);
-            return delay;
-          }
+          reconnectStrategy: retries => Math.min(retries * 50, 1000)
         }
       });
       const subClient = pubClient.duplicate();
-
-      pubClient.on('connect', () => console.log('Redis Pub Client connected.'));
-      subClient.on('connect', () => console.log('Redis Sub Client connected.'));
 
       pubClient.on('error', (err) => console.error('Redis Pub Client Error:', err));
       subClient.on('error', (err) => console.error('Redis Sub Client Error:', err));

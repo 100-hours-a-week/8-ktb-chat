@@ -61,8 +61,18 @@ const getFileFromRequest = async (req) => {
 
       // 채팅방 권한 검증을 위한 메시지 조회
       const message = await Message.findOne({ file: fileDoc._id });
+      
+      // 메시지가 없더라도 파일 소유자이면 접근 허용 (업로드 직후 등)
       if (!message) {
-        throw new Error('File message not found');
+        if (fileDoc.user.toString() === req.user.id.toString()) {
+          return {
+            file: fileDoc.toObject(),
+            hasAccess: true,
+            roomId: null, // 메시지가 없으므로 room 정보는 null
+            messageId: null
+          };
+        }
+        throw new Error('File message not found and not an owner');
       }
 
       // 사용자가 해당 채팅방의 참가자인지 확인
