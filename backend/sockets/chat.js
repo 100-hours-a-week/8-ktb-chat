@@ -532,8 +532,8 @@ module.exports = async function(io) {
           activeStreams
         });
 
-        io.to(roomId).emit('message', joinMessage);
-        io.to(roomId).emit('participantsUpdate', room.participants);
+        socket.broadcast.to(roomId).emit('message', joinMessage);
+        socket.broadcast.to(roomId).emit('participantsUpdate', room.participants);
 
         logDebug('user joined room', {
           userId: socket.user.id,
@@ -681,7 +681,9 @@ module.exports = async function(io) {
         // 새 메시지 작성 시 해당 채팅방의 메시지 캐시 무효화
         await CacheService.invalidateByTag(`room:${room}`);
 
-        io.to(room).emit('message', message);
+        // 메시지를 보낸 본인에게는 별도로 전송, 다른 사람들에게는 브로드캐스트
+        socket.emit('message', message);
+        socket.broadcast.to(room).emit('message', message);
 
         // AI 멘션이 있는 경우 AI 응답 생성 (중복 방지)
         if (aiMentions.length > 0) {
@@ -787,8 +789,8 @@ module.exports = async function(io) {
         messageLoadRetries.delete(queueKey);
 
         // 이벤트 발송
-        io.to(roomId).emit('message', leaveMessage);
-        io.to(roomId).emit('participantsUpdate', updatedRoom.participants);
+        socket.broadcast.to(roomId).emit('message', leaveMessage);
+        socket.broadcast.to(roomId).emit('participantsUpdate', updatedRoom.participants);
 
         console.log(`User ${socket.user.id} left room ${roomId} successfully`);
 
@@ -849,8 +851,8 @@ module.exports = async function(io) {
             ).populate('participants', 'name email profileImage');
 
             if (updatedRoom) {
-              io.to(roomId).emit('message', leaveMessage);
-              io.to(roomId).emit('participantsUpdate', updatedRoom.participants);
+              socket.broadcast.to(roomId).emit('message', leaveMessage);
+              socket.broadcast.to(roomId).emit('participantsUpdate', updatedRoom.participants);
             }
           }
         }
@@ -956,7 +958,7 @@ module.exports = async function(io) {
         }
 
         // 업데이트된 리액션 정보 브로드캐스트
-        io.to(message.room).emit('messageReactionUpdate', {
+        socket.broadcast.to(message.room).emit('messageReactionUpdate', {
           messageId,
           reactions: message.reactions
         });
