@@ -7,6 +7,7 @@ const socketIO = require('socket.io');
 const path = require('path');
 const { router: roomsRouter, initializeSocket } = require('./routes/api/rooms');
 const routes = require('./routes');
+const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
@@ -101,12 +102,14 @@ app.get('/health', (req, res) => {
 app.use('/api', routes);
 
 // Socket.IO 설정
-const io = socketIO(server, { 
-  cors: corsOptions,
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  },
   transports: ['websocket', 'polling'],
-  allowEIO3: true,
-  pingTimeout: 60000,
-  pingInterval: 25000
+  maxHttpBufferSize: 1e8, // 100MB
+  pingTimeout: 60000
 });
 
 // 글로벌 소켓 설정
@@ -167,19 +170,16 @@ process.on('SIGTERM', async () => {
   }
 });
 
-// 서버 시작
-mongoose.connect(process.env.MONGO_URI, mongooseOptions)
-  .then(() => {
-    console.log('MongoDB Connected');
-    server.listen(PORT, '0.0.0.0', () => {
-      console.log(`Server running on port ${PORT}`);
-      console.log('Environment:', process.env.NODE_ENV);
-      console.log('API Base URL:', `http://0.0.0.0:${PORT}/api`);
-    });
-  })
-  .catch(err => {
-    console.error('Server startup error:', err);
-    process.exit(1);
-  });
+// 서버 시작 함수
+const startServer = async () => {
+  // Socket.io 설정
+  await require('./sockets/chat')(io);
+
+  // 서버 리스닝
+  const PORT = process.env.PORT || 5001;
+  server.listen(PORT, () => console.log(`Server is running on port ${PORT}`));
+};
+
+startServer();
 
 module.exports = { app, server };

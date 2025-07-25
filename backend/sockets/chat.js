@@ -1,3 +1,5 @@
+const { createAdapter } = require('@socket.io/redis-adapter');
+const { createClient } = require('redis');
 const Message = require('../models/Message');
 const Room = require('../models/Room');
 const User = require('../models/User');
@@ -9,7 +11,14 @@ const SessionService = require('../services/sessionService');
 const aiService = require('../services/aiService');
 const CacheService = require('../services/cacheService');
 
-module.exports = function(io) {
+module.exports = async function(io) {
+  const pubClient = createClient({ url: process.env.REDIS_URL });
+  const subClient = pubClient.duplicate();
+
+  await Promise.all([pubClient.connect(), subClient.connect()]);
+
+  io.adapter(createAdapter(pubClient, subClient));
+  
   const connectedUsers = new Map();
   const streamingSessions = new Map();
   const userRooms = new Map();
