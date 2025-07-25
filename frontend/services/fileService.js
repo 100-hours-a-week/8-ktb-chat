@@ -153,13 +153,26 @@ class FileService {
         };
       }
 
-      const fileData = response.data.file;
+      // 안전한 파일 데이터 처리
+      const fileData = response.data?.data?.file || response.data?.file;
+      if (!fileData || !fileData.filename) {
+        console.error('Invalid file data in response:', response.data);
+        return {
+          success: false,
+          message: '서버 응답에 유효한 파일 정보가 없습니다.'
+        };
+      }
+
       return {
         success: true,
         data: {
-          ...response.data,
           file: {
-            ...fileData,
+            _id: fileData._id,
+            filename: fileData.filename,
+            originalname: fileData.originalname || fileData.filename,
+            mimetype: fileData.mimetype || 'application/octet-stream',
+            size: fileData.size || 0,
+            uploadDate: fileData.uploadDate,
             url: this.getFileUrl(fileData.filename, true)
           }
         }
