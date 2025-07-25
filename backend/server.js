@@ -12,7 +12,6 @@ const { createClient } = require('redis');
 const { createAdapter } = require('@socket.io/redis-adapter');
 const { mongoURI } = require('./config/keys');
 const CacheService = require('./services/cacheService');
-const { initGridFS } = require('./services/gridfsService');
 
 const app = express();
 const server = http.createServer(app);
@@ -226,9 +225,6 @@ const startServer = async () => {
     
     // Redis 어댑터 설정
     await setupRedisAdapter();
-
-    // GridFS 초기화
-    initGridFS();
 
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`Server running on port ${PORT}`);

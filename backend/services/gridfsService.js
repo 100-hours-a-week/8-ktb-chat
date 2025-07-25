@@ -66,36 +66,68 @@ const saveFileToGridFS = async (fileData) => {
   await ensureGridFSReady();
   
   return new Promise((resolve, reject) => {
-    console.log('📁 GridFS 업로드 시작:', {
-      filename: fileData.filename,
-      originalname: fileData.originalname,
-      mimetype: fileData.mimetype,
-      size: fileData.buffer.length
-    });
-
-    const uploadStream = bucket.openUploadStream(fileData.filename, {
-      contentType: fileData.mimetype,
-      metadata: {
-        originalname: fileData.originalname,
-        uploadDate: new Date()
+    try {
+      // 입력 데이터 안전성 검증
+      if (!fileData) {
+        throw new Error('파일 데이터가 제공되지 않았습니다.');
       }
-    });
+      if (!fileData.filename) {
+        throw new Error('파일명이 제공되지 않았습니다.');
+      }
+      if (!fileData.buffer) {
+        throw new Error('파일 버퍼가 제공되지 않았습니다.');
+      }
 
-    uploadStream.on('finish', (file) => {
-      console.log('✅ GridFS 업로드 완료:', {
-        fileId: file._id,
-        filename: file.filename,
-        length: file.length
+      console.log('📁 GridFS 업로드 시작:', {
+        filename: fileData.filename,
+        originalname: fileData.originalname || 'unknown',
+        mimetype: fileData.mimetype || 'application/octet-stream',
+        size: fileData.buffer.length
       });
-      resolve(file);
-    });
 
-    uploadStream.on('error', (error) => {
-      console.error('❌ GridFS 업로드 실패:', error);
-      reject(error);
-    });
+      const uploadStream = bucket.openUploadStream(fileData.filename, {
+        contentType: fileData.mimetype || 'application/octet-stream',
+        metadata: {
+          originalname: fileData.originalname || 'unknown',
+          uploadDate: new Date()
+        }
+      });
 
-    uploadStream.end(fileData.buffer);
+      uploadStream.on('finish', (file) => {
+        try {
+          // GridFS 응답 안전성 검증
+          const safeFile = {
+            _id: file._id,
+            filename: file.filename || fileData.filename,
+            length: file.length || fileData.buffer.length,
+            contentType: file.contentType || fileData.mimetype || 'application/octet-stream',
+            uploadDate: file.uploadDate || new Date()
+          };
+
+          console.log('✅ GridFS 업로드 완료:', safeFile);
+          resolve(safeFile);
+        } catch (finishError) {
+          console.error('❌ GridFS finish handler error:', finishError);
+          reject(new Error(`GridFS 완료 처리 실패: ${finishError.message}`));
+        }
+      });
+
+      uploadStream.on('error', (error) => {
+        console.error('❌ GridFS 업로드 실패:', error);
+        reject(new Error(`GridFS 업로드 실패: ${error.message}`));
+      });
+
+      try {
+        uploadStream.end(fileData.buffer);
+      } catch (streamError) {
+        console.error('❌ GridFS stream write error:', streamError);
+        reject(new Error(`GridFS 스트림 오류: ${streamError.message}`));
+      }
+
+    } catch (setupError) {
+      console.error('❌ GridFS setup error:', setupError);
+      reject(setupError);
+    }
   });
 };
 

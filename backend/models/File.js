@@ -54,6 +54,10 @@ const FileSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  data: {
+    type: String,
+    required: false // Base64 인코딩된 파일 데이터
+  },
   gridfsId: {
     type: mongoose.Schema.Types.ObjectId,
     required: false,

@@ -8,12 +8,6 @@ const { promisify } = require('util');
 const crypto = require('crypto');
 const { uploadDir } = require('../middleware/upload');
 const CacheService = require('../services/cacheService');
-const { 
-  saveFileToGridFS, 
-  getFileStreamFromGridFS, 
-  getFileInfoFromGridFS, 
-  deleteFileFromGridFS 
-} = require('../services/gridfsService');
 
 const fsPromises = {
   readFile: promisify(fs.readFile),
@@ -203,78 +197,54 @@ exports.uploadFile = async (req, res) => {
       // 해시 에러는 무시하고 계속 진행
     }
 
-    // 새 파일 저장 (GridFS 사용)
+    // 새 파일 저장 (Base64 MongoDB 직접 저장)
     const safeFilename = generateSafeFilename(req.file.originalname);
     
-    console.log('🚀 Starting GridFS upload:', {
+    console.log('🚀 Starting Base64 MongoDB upload:', {
       originalname: req.file.originalname,
       safeFilename,
       tempPath: req.file.path,
       mimetype: req.file.mimetype,
-      size: req.file.size,
-      hasReqFile: !!req.file,
-      reqFileKeys: req.file ? Object.keys(req.file) : 'no req.file'
+      size: req.file.size
     });
 
-    // 파일 버퍼 읽기 - 안전한 방식으로
-    let fileBuffer;
+    // 파일을 Base64로 인코딩
+    let fileBuffer, base64Data;
     try {
-      console.log('📖 Reading file buffer from:', req.file.path);
+      console.log('📖 Reading and encoding file...');
       fileBuffer = await fsPromises.readFile(req.file.path);
-      console.log('✅ File buffer read successfully, size:', fileBuffer.length);
-    } catch (bufferError) {
-      console.error('❌ File buffer read failed:', bufferError);
-      throw new Error(`파일 읽기 실패: ${bufferError.message}`);
+      base64Data = fileBuffer.toString('base64');
+      console.log('✅ File encoded to Base64, size:', base64Data.length);
+    } catch (encodeError) {
+      console.error('❌ File encoding failed:', encodeError);
+      throw new Error(`파일 인코딩 실패: ${encodeError.message}`);
     }
 
-    // GridFS에 파일 업로드 - 안전한 방식으로
-    let gridfsFile;
-    try {
-      console.log('🚀 Uploading to GridFS...');
-      gridfsFile = await saveFileToGridFS({
-        filename: safeFilename,
-        originalname: req.file.originalname || 'unknown',
-        mimetype: req.file.mimetype || 'application/octet-stream',
-        buffer: fileBuffer
-      });
-      console.log('✅ GridFS upload successful:', gridfsFile);
-    } catch (gridfsError) {
-      console.error('❌ GridFS upload failed:', gridfsError);
-      throw new Error(`GridFS 업로드 실패: ${gridfsError.message}`);
-    }
-    
-    console.log('✅ GridFS upload completed, creating database record...');
-
-    // 데이터베이스에 파일 정보 저장 - 안전한 방식으로
+    // MongoDB에 파일 정보 저장
     let file;
     try {
+      console.log('💾 Saving to MongoDB...');
       file = new File({
         filename: safeFilename,
         originalname: req.file.originalname || 'unknown',
         mimetype: req.file.mimetype || 'application/octet-stream',
         size: req.file.size || fileBuffer.length,
         user: req.user.id,
-        path: `gridfs://${safeFilename}`, // GridFS 경로 표시
-        gridfsId: gridfsFile._id // GridFS 파일 ID 저장
+        path: `mongodb://${safeFilename}`, // MongoDB 저장 표시
+        data: base64Data // Base64 데이터 직접 저장
       });
 
       await file.save();
-      console.log('✅ Database record created successfully:', {
+      console.log('✅ File saved to MongoDB successfully:', {
         fileId: file._id,
         filename: file.filename,
-        gridfsId: gridfsFile._id
+        dataSize: base64Data.length
       });
     } catch (dbError) {
-      console.error('❌ Database save failed:', dbError);
-      // GridFS에서 업로드된 파일 정리
-      try {
-        await deleteFileFromGridFS(safeFilename);
-      } catch (cleanupError) {
-        console.error('❌ GridFS cleanup failed:', cleanupError);
-      }
+      console.error('❌ MongoDB save failed:', dbError);
       throw new Error(`데이터베이스 저장 실패: ${dbError.message}`);
     }
-
+    
     // 로컬 임시 파일 삭제
     try {
       await fsPromises.unlink(req.file.path);
@@ -385,42 +355,34 @@ exports.downloadFile = async (req, res) => {
       }
     }
 
-    console.log('Getting file info from GridFS for download:', filename);
+    console.log('Getting file info from MongoDB for download:', filename);
 
-    // GridFS에서 파일 정보 조회
-    const gridfsFile = await getFileInfoFromGridFS(filename);
-    
-    // GridFS에서 파일 스트림 생성
-    const fileStream = await getFileStreamFromGridFS(filename);
-    
-    console.log('Streaming file download from GridFS:', { 
+    // MongoDB에서 파일 데이터 조회
+    const fileData = file.data;
+    const contentType = file.mimetype || 'application/octet-stream';
+    const originalName = file.originalname || filename;
+
+    // 파일 데이터를 버퍼로 변환
+    const fileBuffer = Buffer.from(fileData, 'base64');
+
+    console.log('Streaming file download from MongoDB:', { 
       filename, 
-      contentType: gridfsFile.contentType,
-      length: gridfsFile.length 
+      contentType,
+      length: fileBuffer.length 
     });
 
     // 다운로드용 응답 헤더 설정
     res.set({
-      'Content-Type': gridfsFile.contentType,
-      'Content-Length': gridfsFile.length,
-      'Content-Disposition': `attachment; filename="${encodeURIComponent(file.originalname || filename)}"`,
+      'Content-Type': contentType,
+      'Content-Length': fileBuffer.length,
+      'Content-Disposition': `attachment; filename="${encodeURIComponent(originalName)}"`,
       'Cache-Control': 'private, no-cache, no-store, must-revalidate',
       'Pragma': 'no-cache',
       'Expires': '0'
     });
 
     // 파일 스트림을 응답으로 전송
-    fileStream.on('error', (error) => {
-      console.error('GridFS download streaming error:', error);
-      if (!res.headersSent) {
-        res.status(500).json({
-          success: false,
-          message: '파일 다운로드 중 오류가 발생했습니다.'
-        });
-      }
-    });
-
-    fileStream.pipe(res);
+    res.send(fileBuffer);
 
   } catch (error) {
     console.error('DownloadFile error:', {
@@ -478,41 +440,33 @@ exports.viewFile = async (req, res) => {
       }
     }
 
-    console.log('Getting file info from GridFS:', filename);
+    console.log('Getting file info from MongoDB:', filename);
 
-    // GridFS에서 파일 정보 조회
-    const gridfsFile = await getFileInfoFromGridFS(filename);
-    
-    // GridFS에서 파일 스트림 생성
-    const fileStream = await getFileStreamFromGridFS(filename);
-    
-    console.log('Streaming file from GridFS:', { 
+    // MongoDB에서 파일 데이터 조회
+    const fileData = file.data;
+    const contentType = file.mimetype || 'application/octet-stream';
+    const originalName = file.originalname || filename;
+
+    // 파일 데이터를 버퍼로 변환
+    const fileBuffer = Buffer.from(fileData, 'base64');
+
+    console.log('Streaming file from MongoDB:', { 
       filename, 
-      contentType: gridfsFile.contentType,
-      length: gridfsFile.length 
+      contentType,
+      length: fileBuffer.length 
     });
 
     // 응답 헤더 설정
     res.set({
-      'Content-Type': gridfsFile.contentType,
-      'Content-Length': gridfsFile.length,
-      'Content-Disposition': `inline; filename="${encodeURIComponent(file.originalname || filename)}"`,
+      'Content-Type': contentType,
+      'Content-Length': fileBuffer.length,
+      'Content-Disposition': `inline; filename="${encodeURIComponent(originalName)}"`,
       'Cache-Control': 'public, max-age=31536000, immutable', // 1년 캐시
-      'Last-Modified': new Date(gridfsFile.uploadDate).toUTCString()
+      'Last-Modified': new Date(file.uploadDate).toUTCString()
     });
 
     // 파일 스트림을 응답으로 전송
-    fileStream.on('error', (error) => {
-      console.error('GridFS streaming error:', error);
-      if (!res.headersSent) {
-        res.status(500).json({
-          success: false,
-          message: '파일 스트리밍 중 오류가 발생했습니다.'
-        });
-      }
-    });
-
-    fileStream.pipe(res);
+    res.send(fileBuffer);
 
   } catch (error) {
     console.error('ViewFile error:', {
@@ -587,19 +541,17 @@ exports.deleteFile = async (req, res) => {
       });
     }
 
-    console.log('Deleting file from GridFS:', file.filename);
+    console.log('Deleting file from MongoDB:', file.filename);
 
-    // GridFS에서 파일 삭제
+    // MongoDB에서 파일 데이터 삭제
     try {
-      await deleteFileFromGridFS(file.filename);
-      console.log('File deleted from GridFS successfully:', file.filename);
-    } catch (gridfsError) {
-      console.warn('Failed to delete file from GridFS (continuing with DB cleanup):', gridfsError.message);
+      // 파일 데이터는 데이터베이스에 직접 저장되므로, 데이터베이스에서 삭제
+      await file.deleteOne();
+      console.log('File record deleted from database:', file.filename);
+    } catch (dbError) {
+      console.error('❌ MongoDB delete failed:', dbError);
+      throw new Error(`데이터베이스 삭제 실패: ${dbError.message}`);
     }
-
-    // 데이터베이스에서 파일 정보 삭제
-    await file.deleteOne();
-    console.log('File record deleted from database:', file.filename);
 
     // 파일 삭제 시 관련 캐시 무효화
     await CacheService.invalidateMultiple([
