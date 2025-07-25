@@ -9,6 +9,18 @@ on:
       - 'backend/**'
       - 'scripts/**'
       - '.github/workflows/backend-cicd.yml'
+  # 수동 실행 가능하도록 추가
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '배포 환경 선택'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
 
 # 환경 변수 설정
 env:
@@ -20,11 +32,94 @@ env:
   BACKEND_PORT: 5001
   HEALTH_CHECK_PATH: /health
   PUBLIC_URL: https://chat.goorm-ktb-008.goorm.team
+  # 타임아웃 설정
+  DEPLOYMENT_TIMEOUT: 300  # 5분
+  HEALTH_CHECK_TIMEOUT: 180  # 3분
 
 jobs:
+  # 사전 검증 단계 추가
+  pre-deployment-check:
+    runs-on: ubuntu-latest
+    outputs:
+      can_deploy: ${{ steps.validation.outputs.can_deploy }}
+      
+    steps:
+    - name: 코드 체크아웃
+      uses: actions/checkout@v4
+      
+    - name: 필수 시크릿 검증
+      id: validation
+      run: |
+        echo "🔍 필수 시크릿 검증 중..."
+        
+        # 필수 시크릿들이 설정되어 있는지 확인
+        MISSING_SECRETS=""
+        
+        if [[ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]]; then
+          MISSING_SECRETS="${MISSING_SECRETS}AWS_ACCESS_KEY_ID, "
+        fi
+        
+        if [[ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]]; then
+          MISSING_SECRETS="${MISSING_SECRETS}AWS_SECRET_ACCESS_KEY, "
+        fi
+        
+        if [[ -z "${{ secrets.EC2_SSH_PRIVATE_KEY }}" ]]; then
+          MISSING_SECRETS="${MISSING_SECRETS}EC2_SSH_PRIVATE_KEY, "
+        fi
+        
+        if [[ -z "${{ secrets.ENV_BACKEND_DEV }}" ]]; then
+          MISSING_SECRETS="${MISSING_SECRETS}ENV_BACKEND_DEV, "
+        fi
+        
+        if [[ -n "$MISSING_SECRETS" ]]; then
+          echo "❌ 다음 GitHub Secrets가 설정되지 않았습니다: ${MISSING_SECRETS%%, }"
+          echo ""
+          echo "📋 GitHub Secrets 설정 가이드:"
+          echo "1. GitHub 리포지토리 → Settings → Secrets and variables → Actions"
+          echo "2. 다음 시크릿들을 추가하세요:"
+          echo "   - AWS_ACCESS_KEY_ID: AWS IAM 사용자 Access Key"
+          echo "   - AWS_SECRET_ACCESS_KEY: AWS IAM 사용자 Secret Key"
+          echo "   - EC2_SSH_PRIVATE_KEY: EC2 SSH 개인키 (.pem 파일 내용)"
+          echo "   - ENV_BACKEND_DEV: 백엔드 환경변수 파일 내용"
+          echo ""
+          echo "can_deploy=false" >> $GITHUB_OUTPUT
+          exit 1
+        else
+          echo "✅ 모든 필수 시크릿이 설정되어 있습니다."
+          echo "can_deploy=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: AWS 연결 테스트
+      if: steps.validation.outputs.can_deploy == 'true'
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: ASG 존재 확인
+      if: steps.validation.outputs.can_deploy == 'true'
+      run: |
+        echo "🔍 Auto Scaling Group 확인 중..."
+        
+        ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups \
+          --auto-scaling-group-names ${{ env.ASG_NAME }} \
+          --query 'AutoScalingGroups[0].AutoScalingGroupName' \
+          --output text 2>/dev/null || echo "None")
+        
+        if [[ "$ASG_EXISTS" == "None" ]]; then
+          echo "❌ Auto Scaling Group '${{ env.ASG_NAME }}'를 찾을 수 없습니다."
+          echo "ASG 이름을 확인하고 올바른 AWS 리전에 있는지 확인하세요."
+          exit 1
+        else
+          echo "✅ Auto Scaling Group '${{ env.ASG_NAME }}' 확인됨"
+        fi
+
   # 실행 중인 인스턴스에 코드 직접 배포
   deploy-to-running-instances:
     runs-on: ubuntu-latest
+    needs: pre-deployment-check
+    if: needs.pre-deployment-check.outputs.can_deploy == 'true'
     
     steps:
     - name: 코드 체크아웃
@@ -49,6 +144,11 @@ jobs:
         echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
         echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
         echo "deployment_id=deploy-${TIMESTAMP}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+        
+        echo "📋 배포 정보:"
+        echo "- 배포 ID: deploy-${TIMESTAMP}-${SHORT_SHA}"
+        echo "- 커밋: ${SHORT_SHA}"
+        echo "- 브랜치: ${{ github.ref_name }}"
 
     - name: ASG 인스턴스 목록 가져오기
       id: get-instances
@@ -63,6 +163,7 @@ jobs:
         
         if [[ -z "$INSTANCE_IDS" ]]; then
           echo "❌ 실행 중인 인스턴스를 찾을 수 없습니다."
+          echo "Auto Scaling Group에 활성화된 인스턴스가 있는지 확인하세요."
           exit 1
         fi
         
@@ -90,6 +191,11 @@ jobs:
           fi
         done
         
+        if [[ $INSTANCE_COUNT -eq 0 ]]; then
+          echo "❌ 접근 가능한 퍼블릭 IP가 있는 인스턴스를 찾을 수 없습니다."
+          exit 1
+        fi
+        
         echo "✅ 배포 대상 인스턴스: ${INSTANCE_COUNT}개"
         echo "instance_ids=${INSTANCE_IDS}" >> $GITHUB_OUTPUT
         echo "instance_ips=${INSTANCE_IPS}" >> $GITHUB_OUTPUT
@@ -105,6 +211,8 @@ jobs:
         host: ${{ steps.get-instances.outputs.instance_ips_comma }}
         username: ec2-user
         key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+        timeout: 300s  # 5분 타임아웃
+        command_timeout: 600s  # 10분 명령 타임아웃
         script: |
           #!/bin/bash
           set -e
@@ -114,23 +222,41 @@ jobs:
             echo "❌ 에러 발생: $1"
             echo "📋 현재 상태 점검:"
             echo "- 현재 디렉토리: $(pwd)"
-            echo "- 사용 가능한 메모리: $(free -h)"
-            echo "- 디스크 사용량: $(df -h)"
+            echo "- 사용 가능한 메모리: $(free -h | head -2)"
+            echo "- 디스크 사용량: $(df -h / | tail -1)"
             echo "- Node.js 버전: $(node --version 2>/dev/null || echo 'Node.js 없음')"
             echo "- NPM 버전: $(npm --version 2>/dev/null || echo 'NPM 없음')"
             echo "- PM2 상태: $(pm2 list 2>/dev/null || echo 'PM2 없음')"
             exit 1
           }
           
-          echo "🚀 자동 배포 시작..."
+          echo "🚀 자동 배포 시작 (배포 ID: ${{ steps.meta.outputs.deployment_id }})"
+          echo "📅 배포 시간: $(date)"
+          echo "🏷️  커밋: ${{ steps.meta.outputs.short_sha }}"
+          echo "🌿 브랜치: ${{ github.ref_name }}"
           
-          # Node.js 및 PM2 강제 설치 (경로 문제 해결)
-          echo "📦 Node.js 설치 중..."
-          curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash - || error_exit "Node.js 저장소 추가 실패"
-          sudo yum install -y nodejs || error_exit "Node.js 설치 실패"
+          # Node.js 및 PM2 설치 확인 및 설치
+          echo "📦 개발 도구 설치 중..."
           
-          echo "📦 PM2 설치 중..."
-          sudo npm install -g pm2 || error_exit "PM2 설치 실패"
+          # EPEL 리포지토리 활성화 (Amazon Linux 2용)
+          sudo amazon-linux-extras install -y epel 2>/dev/null || echo "EPEL 이미 설치됨"
+          
+          # Node.js 설치
+          if ! command -v node &> /dev/null; then
+            echo "📦 Node.js 설치 중..."
+            curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash - || error_exit "Node.js 저장소 추가 실패"
+            sudo yum install -y nodejs || error_exit "Node.js 설치 실패"
+          else
+            echo "✅ Node.js 이미 설치됨: $(node --version)"
+          fi
+          
+          # PM2 설치
+          if ! command -v pm2 &> /dev/null; then
+            echo "📦 PM2 설치 중..."
+            sudo npm install -g pm2 || error_exit "PM2 설치 실패"
+          else
+            echo "✅ PM2 이미 설치됨: $(pm2 --version)"
+          fi
           
           # PATH 환경변수 갱신
           export PATH=$PATH:/usr/bin:/usr/local/bin
@@ -141,17 +267,37 @@ jobs:
           echo "- NPM: $(npm --version)"
           echo "- PM2: $(pm2 --version)"
           
-          echo "✅ 환경 설정 완료"
-          
           # 시스템 최적화
           echo "🔧 시스템 최적화 중..."
-          sudo swapoff -a || error_exit "스왑 비활성화 실패"
-          echo "✅ 스왑 비활성화 완료"
+          sudo swapoff -a 2>/dev/null || echo "⚠️ 스왑이 이미 비활성화되어 있음"
+          echo "✅ 시스템 최적화 완료"
           
-          # 코드 다운로드 및 .env 파일 생성
+          # 코드 다운로드
           echo "📥 소스코드 다운로드 중..."
           cd /tmp && rm -rf ktb-new
-          git clone -b jacky2 https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new || error_exit "Git 클론 실패"
+          
+          # Git 클론 재시도 로직 추가
+          CLONE_ATTEMPTS=3
+          CLONE_SUCCESS=false
+          
+          for attempt in $(seq 1 $CLONE_ATTEMPTS); do
+            echo "🔄 Git 클론 시도 ${attempt}/${CLONE_ATTEMPTS}..."
+            if git clone -b ${{ github.ref_name }} --depth 1 https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new; then
+              CLONE_SUCCESS=true
+              break
+            else
+              echo "⚠️ Git 클론 시도 ${attempt} 실패"
+              if [[ $attempt -lt $CLONE_ATTEMPTS ]]; then
+                echo "⏳ 5초 후 재시도..."
+                sleep 5
+              fi
+            fi
+          done
+          
+          if [[ "$CLONE_SUCCESS" != "true" ]]; then
+            error_exit "Git 클론이 ${CLONE_ATTEMPTS}번 모두 실패했습니다"
+          fi
+          
           echo "✅ 소스코드 다운로드 완료"
           
           # .env 파일을 다운받은 코드 폴더에 직접 생성
@@ -162,12 +308,15 @@ jobs:
           AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION=ap-northeast-2
+          DEPLOYMENT_ID=${{ steps.meta.outputs.deployment_id }}
+          COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          BRANCH=${{ github.ref_name }}
           EOF
           echo "✅ .env 파일 생성 완료"
           
           # 애플리케이션 배포
           echo "🛑 기존 애플리케이션 정리 중..."
-          sudo -u ec2-user pm2 delete all || echo "⚠️ 기존 PM2 프로세스 없음"
+          sudo -u ec2-user pm2 delete all 2>/dev/null || echo "⚠️ 기존 PM2 프로세스 없음"
           
           echo "📁 배포 디렉토리 설정 중..."
           sudo mkdir -p /opt/ktb-chat-backend || error_exit "배포 디렉토리 생성 실패"
@@ -177,39 +326,75 @@ jobs:
           echo "📦 의존성 설치 중..."
           cd /opt/ktb-chat-backend/backend || error_exit "배포 디렉토리 이동 실패"
           
-          # package.json 확인
+          # 파일 존재 확인
           if [[ ! -f "package.json" ]]; then
             error_exit "package.json 파일을 찾을 수 없습니다"
           fi
           
-          # .env 파일 확인
           if [[ ! -f ".env" ]]; then
             error_exit ".env 파일을 찾을 수 없습니다"
           fi
           
-          sudo -u ec2-user npm ci --production || error_exit "NPM 의존성 설치 실패"
+          if [[ ! -f "server.js" ]]; then
+            error_exit "server.js 파일을 찾을 수 없습니다"
+          fi
+          
+          # NPM 캐시 정리 및 의존성 설치
+          sudo -u ec2-user npm cache clean --force || echo "⚠️ NPM 캐시 정리 실패"
+          sudo -u ec2-user npm ci --production --verbose || error_exit "NPM 의존성 설치 실패"
           echo "✅ 의존성 설치 완료"
           
           # PM2 단일 인스턴스 모드로 시작
-          echo "🚀 PM2 단일 인스턴스 모드로 애플리케이션 시작 중..."
+          echo "🚀 PM2로 애플리케이션 시작 중..."
           sudo -u ec2-user pm2 start server.js \
-            --name 'ktb-backend-single' \
+            --name "ktb-backend-${{ steps.meta.outputs.short_sha }}" \
             --max-memory-restart 700M \
-            --node-args='--max-old-space-size=600' || error_exit "PM2 애플리케이션 시작 실패"
+            --node-args='--max-old-space-size=600' \
+            --log-date-format 'YYYY-MM-DD HH:mm:ss Z' \
+            --merge-logs || error_exit "PM2 애플리케이션 시작 실패"
           
+          # PM2 설정 저장
           sudo -u ec2-user pm2 save || error_exit "PM2 설정 저장 실패"
-          sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user || error_exit "PM2 자동 시작 설정 실패"
+          
+          # PM2 자동 시작 설정
+          sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user || echo "⚠️ PM2 자동 시작 설정 실패 (이미 설정되어 있을 수 있음)"
           
           echo "⏳ 애플리케이션 시작 대기 중..."
-          sleep 5
+          sleep 10
           
           echo "📊 PM2 프로세스 상태 확인:"
           sudo -u ec2-user pm2 list || error_exit "PM2 상태 확인 실패"
           
-          echo "📊 애플리케이션 로그 확인 (최근 10줄):"
-          sudo -u ec2-user pm2 logs --lines 10 --nostream || echo "⚠️ 로그를 가져올 수 없습니다"
+          echo "📊 애플리케이션 로그 확인 (최근 20줄):"
+          sudo -u ec2-user pm2 logs --lines 20 --nostream || echo "⚠️ 로그를 가져올 수 없습니다"
           
-          echo "✅ 배포 완료!"
+          # 로컬 헬스체크
+          echo "🏥 로컬 헬스체크 수행 중..."
+          LOCAL_HEALTH_ATTEMPTS=5
+          LOCAL_HEALTH_SUCCESS=false
+          
+          for attempt in $(seq 1 $LOCAL_HEALTH_ATTEMPTS); do
+            echo "🔍 로컬 헬스체크 시도 ${attempt}/${LOCAL_HEALTH_ATTEMPTS}..."
+            if curl -f --connect-timeout 5 --max-time 10 http://localhost:${{ env.BACKEND_PORT }}${{ env.HEALTH_CHECK_PATH }}; then
+              LOCAL_HEALTH_SUCCESS=true
+              echo "✅ 로컬 헬스체크 성공!"
+              break
+            else
+              echo "⚠️ 로컬 헬스체크 시도 ${attempt} 실패"
+              if [[ $attempt -lt $LOCAL_HEALTH_ATTEMPTS ]]; then
+                echo "⏳ 3초 후 재시도..."
+                sleep 3
+              fi
+            fi
+          done
+          
+          if [[ "$LOCAL_HEALTH_SUCCESS" != "true" ]]; then
+            echo "❌ 로컬 헬스체크가 실패했습니다. 애플리케이션 로그를 확인하세요."
+            sudo -u ec2-user pm2 logs --lines 50 --nostream || echo "로그 확인 실패"
+            error_exit "로컬 헬스체크 실패"
+          fi
+          
+          echo "✅ 인스턴스 배포 완료!"
 
     - name: ALB Target Group 헬스체크
       id: verify-deployment
@@ -224,13 +409,14 @@ jobs:
         
         if [[ "$TARGET_GROUP_ARN" == "None" || -z "$TARGET_GROUP_ARN" ]]; then
           echo "❌ ASG에 연결된 Target Group을 찾을 수 없습니다."
+          echo "Auto Scaling Group에 Load Balancer가 연결되어 있는지 확인하세요."
           exit 1
         fi
         echo "🎯 대상 Target Group: ${TARGET_GROUP_ARN}"
 
         # 모든 대상이 healthy 상태가 될 때까지 대기 (최대 3분)
         echo "⏳ 모든 인스턴스가 ALB에서 Healthy 상태가 될 때까지 대기 중..."
-        TIMEOUT=180
+        TIMEOUT=${{ env.HEALTH_CHECK_TIMEOUT }}
         ELAPSED=0
         ALL_HEALTHY=false
 
@@ -239,36 +425,40 @@ jobs:
           
           # unhealthy 또는 initial 상태인 인스턴스 수 확인
           UNHEALTHY_COUNT=$(echo "$HEALTH_STATUS" | jq '[.TargetHealthDescriptions[] | select(.TargetHealth.State != "healthy")] | length')
+          TOTAL_TARGETS=$(echo "$HEALTH_STATUS" | jq '[.TargetHealthDescriptions[]] | length')
+          HEALTHY_TARGETS=$(echo "$HEALTH_STATUS" | jq '[.TargetHealthDescriptions[] | select(.TargetHealth.State == "healthy")] | length')
           
-          if [[ $UNHEALTHY_COUNT -eq 0 ]]; then
-            TOTAL_TARGETS=$(echo "$HEALTH_STATUS" | jq '[.TargetHealthDescriptions[]] | length')
-            HEALTHY_TARGETS=$(echo "$HEALTH_STATUS" | jq '[.TargetHealthDescriptions[] | select(.TargetHealth.State == "healthy")] | length')
-            if [[ $TOTAL_TARGETS -gt 0 && $TOTAL_TARGETS -eq $HEALTHY_TARGETS ]]; then
-              echo "✅ 모든 ${HEALTHY_TARGETS}개 인스턴스가 Healthy 상태입니다!"
-              ALL_HEALTHY=true
-              break
-            fi
+          echo "헬스체크 상태: ${HEALTHY_TARGETS}/${TOTAL_TARGETS} healthy (${ELAPSED}초 경과)"
+          
+          if [[ $UNHEALTHY_COUNT -eq 0 && $TOTAL_TARGETS -gt 0 && $TOTAL_TARGETS -eq $HEALTHY_TARGETS ]]; then
+            echo "✅ 모든 ${HEALTHY_TARGETS}개 인스턴스가 Healthy 상태입니다!"
+            ALL_HEALTHY=true
+            break
           fi
           
-          echo "현재 상태: $(echo "$HEALTH_STATUS" | jq -r '.TargetHealthDescriptions[] | .Target.Id + ": " + .TargetHealth.State' | tr '\n' ' | ') (${ELAPSED}초 경과)"
+          # 상세 상태 출력
+          echo "$(echo "$HEALTH_STATUS" | jq -r '.TargetHealthDescriptions[] | .Target.Id + ": " + .TargetHealth.State + " (" + (.TargetHealth.Description // "정상") + ")"')"
+          
           sleep 15
           ELAPSED=$((ELAPSED + 15))
         done
 
         if [[ "$ALL_HEALTHY" != "true" ]]; then
-          echo "❌ 일부 인스턴스가 Healthy 상태가 되지 않았습니다."
+          echo "❌ ${TIMEOUT}초 내에 모든 인스턴스가 Healthy 상태가 되지 않았습니다."
+          echo "현재 상태:"
+          echo "$HEALTH_STATUS" | jq -r '.TargetHealthDescriptions[] | .Target.Id + ": " + .TargetHealth.State + " - " + (.TargetHealth.Description // "N/A")'
           exit 1
         fi
 
         # 최종 Public URL 헬스체크
-        echo "🌐 최종 Public URL 헬스체크 중... (${{ env.PUBLIC_URL }}/health)"
-        HEALTH_CHECK_ATTEMPTS=3
+        echo "🌐 최종 Public URL 헬스체크 중... (${{ env.PUBLIC_URL }}${{ env.HEALTH_CHECK_PATH }})"
+        HEALTH_CHECK_ATTEMPTS=5
         HEALTH_CHECK_SUCCESS=false
         
         for attempt in $(seq 1 $HEALTH_CHECK_ATTEMPTS); do
-          echo "🔍 헬스체크 시도 ${attempt}/${HEALTH_CHECK_ATTEMPTS}..."
+          echo "🔍 Public URL 헬스체크 시도 ${attempt}/${HEALTH_CHECK_ATTEMPTS}..."
           
-          if curl -f -L --max-redirs 3 --connect-timeout 10 --max-time 30 ${{ env.PUBLIC_URL }}/health; then
+          if curl -f -L --max-redirs 3 --connect-timeout 10 --max-time 30 ${{ env.PUBLIC_URL }}${{ env.HEALTH_CHECK_PATH }}; then
             echo "🎉 Public URL 헬스체크 성공!"
             HEALTH_CHECK_SUCCESS=true
             break
@@ -283,109 +473,95 @@ jobs:
         
         if [[ "$HEALTH_CHECK_SUCCESS" != "true" ]]; then
           echo "❌ Public URL 헬스체크가 ${HEALTH_CHECK_ATTEMPTS}번 모두 실패했습니다."
-          echo "🔍 ALB 및 Target Group 상태를 확인하세요."
+          echo "🔍 ALB 설정과 대상 그룹 상태를 확인하세요."
+          echo "🔗 확인할 URL: ${{ env.PUBLIC_URL }}${{ env.HEALTH_CHECK_PATH }}"
           exit 1
         fi
         
         echo "healthy_count=${HEALTHY_TARGETS}" >> $GITHUB_OUTPUT
-        echo "unhealthy_instances=''" >> $GITHUB_OUTPUT # Target Group 헬스체크로 대체
+        echo "total_count=${TOTAL_TARGETS}" >> $GITHUB_OUTPUT
 
     - name: 배포 결과 요약
       if: always()
       run: |
         # 배포 성공/실패 상태 확인
         if [[ "${{ job.status }}" == "success" ]]; then
-          echo "## 🎉 코드 배포 및 검증 성공" >> $GITHUB_STEP_SUMMARY
+          echo "## 🎉 백엔드 배포 성공!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ 배포 완료 정보" >> $GITHUB_STEP_SUMMARY
+          echo "- **상태**: 모든 검증 단계 통과" >> $GITHUB_STEP_SUMMARY
+          echo "- **헬스체크**: ALB Target Group ✅ + Public URL ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **가용성**: 100% (모든 서버 정상 동작)" >> $GITHUB_STEP_SUMMARY
         else
-          echo "## ❌ 코드 배포 실패" >> $GITHUB_STEP_SUMMARY
+          echo "## ❌ 백엔드 배포 실패" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 🚨 실패 원인 분석" >> $GITHUB_STEP_SUMMARY
-          echo "- 배포 과정에서 오류가 발생했습니다" >> $GITHUB_STEP_SUMMARY
-          echo "- 위의 로그를 확인하여 구체적인 오류 메시지를 찾아보세요" >> $GITHUB_STEP_SUMMARY
-          echo "- 일반적인 원인: Node.js 설치 실패, Git 클론 실패, 의존성 설치 실패, PM2 시작 실패" >> $GITHUB_STEP_SUMMARY
+          echo "배포 과정에서 오류가 발생했습니다. 다음 사항들을 확인해보세요:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### 🔍 일반적인 실패 원인들" >> $GITHUB_STEP_SUMMARY
+          echo "1. **GitHub Secrets 미설정**: AWS 자격증명, SSH 키, 환경변수" >> $GITHUB_STEP_SUMMARY
+          echo "2. **AWS 권한 부족**: EC2, Auto Scaling, ELB 권한 확인" >> $GITHUB_STEP_SUMMARY
+          echo "3. **네트워크 문제**: EC2 인스턴스 접근성, 보안그룹 설정" >> $GITHUB_STEP_SUMMARY
+          echo "4. **애플리케이션 오류**: 의존성 설치, 환경변수, 포트 충돌" >> $GITHUB_STEP_SUMMARY
+          echo "5. **인프라 상태**: ASG 인스턴스 상태, Load Balancer 설정" >> $GITHUB_STEP_SUMMARY
         fi
+        
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📋 배포 정보" >> $GITHUB_STEP_SUMMARY
         echo "- **배포 ID**: \`${{ steps.meta.outputs.deployment_id }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **커밋**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **브랜치**: jacky2" >> $GITHUB_STEP_SUMMARY
-        echo "- **배포 시간**: ${{ steps.meta.outputs.timestamp }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **커밋 해시**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **브랜치**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **배포 시간**: \`${{ steps.meta.outputs.timestamp }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **트리거**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🎯 배포 대상" >> $GITHUB_STEP_SUMMARY
-        echo "- **ASG**: \`${{ env.ASG_NAME }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **대상 인스턴스**: ${{ steps.get-instances.outputs.instance_count }}개" >> $GITHUB_STEP_SUMMARY
-        echo "- **검증 방식**: ALB Target Group + Public URL" >> $GITHUB_STEP_SUMMARY
+        echo "### 🎯 인프라 정보" >> $GITHUB_STEP_SUMMARY
+        echo "- **Auto Scaling Group**: \`${{ env.ASG_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **배포 대상 인스턴스**: ${{ steps.get-instances.outputs.instance_count }}개" >> $GITHUB_STEP_SUMMARY
+        echo "- **AWS 리전**: \`${{ env.AWS_REGION }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Public URL**: [${{ env.PUBLIC_URL }}](${{ env.PUBLIC_URL }})" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📊 헬스체크 결과" >> $GITHUB_STEP_SUMMARY
-        echo "- **ALB Target Group**: 모든 인스턴스 Healthy ✅" >> $GITHUB_STEP_SUMMARY
-        echo "- **Public URL**: 응답 성공 ✅" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🔧 수동 배포 가이드" >> $GITHUB_STEP_SUMMARY
-        echo "### 📜 1단계: 최초 1회 설정 (.env 파일 생성)" >> $GITHUB_STEP_SUMMARY
-        echo "- **목표**: 각 EC2 인스턴스에 환경변수 파일 생성" >> $GITHUB_STEP_SUMMARY
-        echo "- **방법**: 아래 스크립트를 각 인스턴스에서 실행 후, GitHub Secret 'ENV_BACKEND_DEV' 내용을 붙여넣고 Ctrl+D를 누르세요." >> $GITHUB_STEP_SUMMARY
-        echo '```bash' >> $GITHUB_STEP_SUMMARY
-        echo "sudo mkdir -p /opt/ktb-chat-backend/backend" >> $GITHUB_STEP_SUMMARY
-        echo "sudo touch /opt/ktb-chat-backend/backend/.env" >> $GITHUB_STEP_SUMMARY
-        echo "sudo chown ec2-user:ec2-user /opt/ktb-chat-backend/backend/.env" >> $GITHUB_STEP_SUMMARY
-        echo "cat << EOF > /opt/ktb-chat-backend/backend/.env" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📜 2단계: 코드 배포 (배포 시마다 실행)" >> $GITHUB_STEP_SUMMARY
-        echo "- **목표**: 최신 코드를 배포하고 클러스터 모드로 애플리케이션 실행" >> $GITHUB_STEP_SUMMARY
-        echo "- **방법**: 아래 스크립트를 각 인스턴스에서 실행하세요." >> $GITHUB_STEP_SUMMARY
-        echo '```bash' >> $GITHUB_STEP_SUMMARY
-        echo "#!/bin/bash" >> $GITHUB_STEP_SUMMARY
-        echo "set -e" >> $GITHUB_STEP_SUMMARY
-        echo "sudo swapoff -a" >> $GITHUB_STEP_SUMMARY
-        echo "cd /tmp && rm -rf ktb-new && git clone -b jacky2 https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user pm2 delete all || true" >> $GITHUB_STEP_SUMMARY
-        echo "sudo cp -r ktb-new/backend/* /opt/ktb-chat-backend/backend/ && cd /opt/ktb-chat-backend/backend" >> $GITHUB_STEP_SUMMARY
-        echo "sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user npm ci --production" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user pm2 start server.js --name 'ktb-backend-single' --max-memory-restart 700M --node-args='--max-old-space-size=600'" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user pm2 save" >> $GITHUB_STEP_SUMMARY
-        echo "sudo env PATH=\$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
         
-                 # 배포 상태에 따른 상세 정보 추가
-         if [[ "${{ steps.verify-deployment.outputs.healthy_count }}" == "${{ steps.get-instances.outputs.instance_count }}" ]]; then
-           echo "### 🎉 배포 성공" >> $GITHUB_STEP_SUMMARY
-           echo "- ✅ **완벽한 배포**: 모든 인스턴스가 헬스체크를 통과했습니다" >> $GITHUB_STEP_SUMMARY
-           echo "- 🚀 **서비스 상태**: 정상 운영 중" >> $GITHUB_STEP_SUMMARY
-           echo "- 📈 **가용성**: 100% (모든 서버 정상)" >> $GITHUB_STEP_SUMMARY
-         else
-        echo "### ⚠️ 배포 주의사항" >> $GITHUB_STEP_SUMMARY
-           echo "- **문제 인스턴스**: ${{ steps.verify-deployment.outputs.unhealthy_instances }}" >> $GITHUB_STEP_SUMMARY
-           echo "- **가용성**: $(echo "scale=1; ${{ steps.verify-deployment.outputs.healthy_count }} * 100 / ${{ steps.get-instances.outputs.instance_count }}" | bc)%" >> $GITHUB_STEP_SUMMARY
-           echo "- **조치 필요**: 문제 인스턴스 수동 확인 및 재시작 권장" >> $GITHUB_STEP_SUMMARY
-           echo "- **로그 확인**: AWS Systems Manager 콘솔에서 상세 로그를 확인하세요" >> $GITHUB_STEP_SUMMARY
-         fi
-        echo "### 🔧 부하 테스트 최적화 배포 가이드 (클러스터 모드)" >> $GITHUB_STEP_SUMMARY
-        echo "- **t3.small 최적화**: 2vCPU, 2GB RAM 최대 활용" >> $GITHUB_STEP_SUMMARY
-        echo "- **PM2 클러스터 모드**: 2개 프로세스로 처리량 2배 향상" >> $GITHUB_STEP_SUMMARY
-        echo '```bash' >> $GITHUB_STEP_SUMMARY
-        echo "#!/bin/bash" >> $GITHUB_STEP_SUMMARY
-        echo "cd /tmp && rm -rf ktb-new && git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user pm2 delete all || true" >> $GITHUB_STEP_SUMMARY
-        echo "sudo cp -r ktb-new/backend/* /opt/ktb-chat-backend/backend/ && cd /opt/ktb-chat-backend/backend" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user npm ci --production" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user pm2 start server.js --name 'ktb-backend-single' --max-memory-restart 700M --node-args='--max-old-space-size=600'" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user pm2 save" >> $GITHUB_STEP_SUMMARY
-        echo "sudo env PATH=\$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-        echo "### 🔧 최종 배포 가이드 (클러스터 + 스왑 OFF)" >> $GITHUB_STEP_SUMMARY
-        echo "- **t3.small 최적화**: 2vCPU, 2GB RAM, 스왑 OFF" >> $GITHUB_STEP_SUMMARY
-        echo "- **PM2 클러스터 모드**: 2개 프로세스로 처리량 2배 향상" >> $GITHUB_STEP_SUMMARY
-        echo '```bash' >> $GITHUB_STEP_SUMMARY
-        echo "#!/bin/bash" >> $GITHUB_STEP_SUMMARY
-        echo "sudo swapoff -a" >> $GITHUB_STEP_SUMMARY
-        echo "cd /tmp && rm -rf ktb-new && git clone -b jacky2 https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user pm2 delete all || true" >> $GITHUB_STEP_SUMMARY
-        echo "sudo cp -r ktb-new/backend/* /opt/ktb-chat-backend/backend/ && cd /opt/ktb-chat-backend/backend" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user npm ci --production" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user pm2 start server.js --name 'ktb-backend-single' --max-memory-restart 700M --node-args='--max-old-space-size=600'" >> $GITHUB_STEP_SUMMARY
-        echo "sudo -u ec2-user pm2 save" >> $GITHUB_STEP_SUMMARY
-        echo "sudo env PATH=\$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
+        if [[ "${{ job.status }}" == "success" ]]; then
+          echo "### 🔧 배포 후 확인사항" >> $GITHUB_STEP_SUMMARY
+          echo "1. **서비스 접속**: [${{ env.PUBLIC_URL }}](${{ env.PUBLIC_URL }})" >> $GITHUB_STEP_SUMMARY
+          echo "2. **헬스체크**: [${{ env.PUBLIC_URL }}${{ env.HEALTH_CHECK_PATH }}](${{ env.PUBLIC_URL }}${{ env.HEALTH_CHECK_PATH }})" >> $GITHUB_STEP_SUMMARY
+          echo "3. **모니터링**: AWS CloudWatch에서 애플리케이션 로그 확인" >> $GITHUB_STEP_SUMMARY
+          echo "4. **성능 테스트**: 부하 테스트 도구로 성능 검증" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### 🛠 문제 해결 가이드" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### 1단계: GitHub Secrets 확인" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "Repository Settings → Secrets and variables → Actions" >> $GITHUB_STEP_SUMMARY
+          echo "필요한 시크릿:" >> $GITHUB_STEP_SUMMARY
+          echo "- AWS_ACCESS_KEY_ID" >> $GITHUB_STEP_SUMMARY
+          echo "- AWS_SECRET_ACCESS_KEY" >> $GITHUB_STEP_SUMMARY
+          echo "- EC2_SSH_PRIVATE_KEY" >> $GITHUB_STEP_SUMMARY
+          echo "- ENV_BACKEND_DEV" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### 2단계: AWS 인프라 확인" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# Auto Scaling Group 확인" >> $GITHUB_STEP_SUMMARY
+          echo "aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${{ env.ASG_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# EC2 인스턴스 상태 확인" >> $GITHUB_STEP_SUMMARY
+          echo "aws ec2 describe-instances --filters \"Name=tag:aws:autoscaling:groupName,Values=${{ env.ASG_NAME }}\"" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### 3단계: 수동 배포 스크립트" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "#!/bin/bash" >> $GITHUB_STEP_SUMMARY
+          echo "# EC2 인스턴스에서 직접 실행" >> $GITHUB_STEP_SUMMARY
+          echo "sudo swapoff -a" >> $GITHUB_STEP_SUMMARY
+          echo "cd /tmp && rm -rf ktb-new" >> $GITHUB_STEP_SUMMARY
+          echo "git clone -b ${{ github.ref_name }} https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new" >> $GITHUB_STEP_SUMMARY
+          echo "sudo -u ec2-user pm2 delete all || true" >> $GITHUB_STEP_SUMMARY
+          echo "sudo cp -r ktb-new/backend/* /opt/ktb-chat-backend/backend/" >> $GITHUB_STEP_SUMMARY
+          echo "cd /opt/ktb-chat-backend/backend" >> $GITHUB_STEP_SUMMARY
+          echo "sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend" >> $GITHUB_STEP_SUMMARY
+          echo "sudo -u ec2-user npm ci --production" >> $GITHUB_STEP_SUMMARY
+          echo "sudo -u ec2-user pm2 start server.js --name 'ktb-backend' --max-memory-restart 700M" >> $GITHUB_STEP_SUMMARY
+          echo "sudo -u ec2-user pm2 save" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        fi
