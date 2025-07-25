@@ -72,6 +72,12 @@ function MyApp({ Component, pageProps }) {
     const handleGlobalError = (event) => {
       console.error('[App] Global error:', event.error);
       
+      // 회원가입/로그인 페이지에서는 인증 에러 처리 건너뛰기
+      const isAuthPage = ['/', '/register'].includes(router.pathname);
+      if (isAuthPage) {
+        return;
+      }
+      
       // 인증 관련 에러인 경우 처리
       if (event.error?.message?.includes('Authentication') || 
           event.error?.message?.includes('Unauthorized')) {
@@ -83,6 +89,12 @@ function MyApp({ Component, pageProps }) {
     // 전역 Promise rejection 핸들러
     const handleUnhandledRejection = (event) => {
       console.error('[App] Unhandled promise rejection:', event.reason);
+      
+      // 회원가입/로그인 페이지에서는 인증 에러 처리 건너뛰기
+      const isAuthPage = ['/', '/register'].includes(router.pathname);
+      if (isAuthPage) {
+        return;
+      }
       
       // 인증 관련 rejection인 경우 처리
       if (event.reason?.response?.status === 401 || 
