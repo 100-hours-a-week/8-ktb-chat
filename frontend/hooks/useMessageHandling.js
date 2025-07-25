@@ -95,85 +95,157 @@ export const useMessageHandling = (socketRef, currentUser, router, handleSession
  }, [socketRef, router?.query?.room, loadingMessages, messages]);
 
  const handleMessageSubmit = useCallback(async (messageData) => {
+   console.log('=== FRONTEND MESSAGE SUBMIT START ===');
+   console.log('Submit data:', {
+     type: messageData?.type,
+     hasContent: !!messageData?.content,
+     hasFileData: !!messageData?.fileData,
+     socketConnected: socketRef.current?.connected,
+     currentUser: !!currentUser,
+     roomId: router?.query?.room,
+     timestamp: new Date().toISOString()
+   });
+
    if (!socketRef.current?.connected || !currentUser) {
-     console.error('[Chat] Cannot send message: Socket not connected');
+     console.error('❌ FRONTEND ERROR: Socket not connected or no user');
+     console.error('Socket details:', {
+       connected: socketRef.current?.connected,
+       socketExists: !!socketRef.current,
+       hasCurrentUser: !!currentUser
+     });
      Toast.error('채팅 서버와 연결이 끊어졌습니다.');
      return;
    }
 
    const roomId = router?.query?.room;
    if (!roomId) {
+     console.error('❌ FRONTEND ERROR: No room ID');
      Toast.error('채팅방 정보를 찾을 수 없습니다.');
      return;
    }
 
    try {
-     console.log('[Chat] Sending message:', messageData);
+     console.log('📤 Sending message:', messageData);
 
      if (messageData.type === 'file') {
+       console.log('📁 Processing file upload...');
        setUploading(true);
        setUploadError(null);
        setUploadProgress(0);
 
-       const uploadResponse = await fileService.uploadFile(
-         messageData.fileData.file,
-         (progress) => setUploadProgress(progress)
-       );
-
-       if (!uploadResponse.success) {
-         throw new Error(uploadResponse.message || '파일 업로드에 실패했습니다.');
-       }
-
-       socketRef.current.emit('chatMessage', {
-         room: roomId,
-         type: 'file',
-         content: messageData.content || '',
-         requestId: generateRequestId(),
-         fileData: {
-           _id: uploadResponse.data.file._id,
-           filename: uploadResponse.data.file.filename,
-           originalname: uploadResponse.data.file.originalname,
-           mimetype: uploadResponse.data.file.mimetype,
-           size: uploadResponse.data.file.size
-         }
+       console.log('File details:', {
+         hasFile: !!messageData.fileData?.file,
+         fileName: messageData.fileData?.file?.name,
+         fileSize: messageData.fileData?.file?.size,
+         fileType: messageData.fileData?.file?.type
        });
 
-       setFilePreview(null);
-       setMessage('');
-       setUploading(false);
-       setUploadProgress(0);
+       try {
+         console.log('🚀 Starting file upload...');
+         const uploadResponse = await fileService.uploadFile(
+           messageData.fileData.file,
+           (progress) => {
+             console.log('📊 Upload progress:', progress + '%');
+             setUploadProgress(progress);
+           }
+         );
+
+         console.log('✅ Upload response received:', {
+           success: uploadResponse?.success,
+           hasData: !!uploadResponse?.data,
+           fileId: uploadResponse?.data?.file?._id,
+           error: uploadResponse?.error || uploadResponse?.message
+         });
+
+         if (!uploadResponse.success) {
+           console.error('❌ Upload failed:', {
+             message: uploadResponse.message,
+             error: uploadResponse.error,
+             details: uploadResponse.details
+           });
+           throw new Error(uploadResponse.message || '파일 업로드에 실패했습니다.');
+         }
+
+         console.log('📡 Emitting file message to socket...');
+         const messagePayload = {
+           room: roomId,
+           type: 'file',
+           content: messageData.content || '',
+           requestId: generateRequestId(),
+           fileData: {
+             _id: uploadResponse.data.file._id,
+             filename: uploadResponse.data.file.filename,
+             originalname: uploadResponse.data.file.originalname,
+             mimetype: uploadResponse.data.file.mimetype,
+             size: uploadResponse.data.file.size
+           }
+         };
+
+         console.log('Message payload:', messagePayload);
+         socketRef.current.emit('chatMessage', messagePayload);
+         console.log('✅ File message emitted successfully');
+
+         setFilePreview(null);
+         setMessage('');
+         setUploading(false);
+         setUploadProgress(0);
+
+       } catch (uploadError) {
+         console.error('❌ FILE UPLOAD ERROR:', {
+           message: uploadError.message,
+           stack: uploadError.stack,
+           name: uploadError.name
+         });
+         
+         setUploading(false);
+         setUploadProgress(0);
+         setUploadError(uploadError.message);
+         Toast.error(`파일 업로드 실패: ${uploadError.message}`);
+         throw uploadError;
+       }
 
      } else if (messageData.content?.trim()) {
-       socketRef.current.emit('chatMessage', {
+       console.log('📝 Processing text message...');
+       const textPayload = {
          room: roomId,
          type: 'text',
          content: messageData.content.trim(),
          requestId: generateRequestId()
-       });
+       };
 
-       setMessage('');
+       console.log('Text message payload:', textPayload);
+       socketRef.current.emit('chatMessage', textPayload);
+       console.log('✅ Text message emitted successfully');
      }
 
-     setShowEmojiPicker(false);
-     setShowMentionList(false);
+     console.log('=== FRONTEND MESSAGE SUBMIT SUCCESS ===');
 
    } catch (error) {
-     console.error('[Chat] Message submit error:', error);
+     console.error('=== FRONTEND MESSAGE SUBMIT ERROR ===');
+     console.error('Error details:', {
+       message: error.message,
+       stack: error.stack,
+       name: error.name,
+       messageData: {
+         type: messageData?.type,
+         hasContent: !!messageData?.content,
+         hasFileData: !!messageData?.fileData
+       },
+       timestamp: new Date().toISOString()
+     });
 
      if (error.message?.includes('세션') || 
          error.message?.includes('인증') || 
          error.message?.includes('토큰')) {
+       console.log('🔄 Session error detected, handling session error...');
        await handleSessionError();
        return;
      }
 
-     Toast.error(error.message || '메시지 전송 중 오류가 발생했습니다.');
-     if (messageData.type === 'file') {
-       setUploadError(error.message);
-       setUploading(false);
-     }
+     Toast.error(`메시지 전송 실패: ${error.message}`);
+     console.error('=== FRONTEND MESSAGE SUBMIT ERROR END ===');
    }
- }, [currentUser, router, handleSessionError, socketRef]);
+ }, [socketRef, currentUser, router?.query?.room, handleSessionError, setUploading, setUploadError, setUploadProgress, setFilePreview, setMessage]);
 
  const handleEmojiToggle = useCallback(() => {
    setShowEmojiPicker(prev => !prev);

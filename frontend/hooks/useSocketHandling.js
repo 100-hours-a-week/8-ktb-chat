@@ -144,6 +144,22 @@ export const useSocketHandling = (router, maxRetries = 5) => { // 최대 재시�
         handleConnectionError(new Error(`Disconnected: ${reason}`), handleSessionError);
       });
       
+      // 소켓 에러 이벤트 리스너
+      socket.on('error', (error) => {
+        console.error('=== SOCKET ERROR RECEIVED ===');
+        console.error('Socket error details:', {
+          message: error.message,
+          code: error.code,
+          timestamp: error.timestamp,
+          socketId: socket.id,
+          connected: socket.connected,
+          roomId: router?.query?.room,
+          userId: getCurrentUser()?.id
+        });
+        
+        Toast.error(`서버 오류: ${error.message || '알 수 없는 오류가 발생했습니다.'}`);
+      });
+
     } catch (error) {
       console.error('Reconnection failed:', error);
       setConnected(false);

@@ -569,26 +569,49 @@ module.exports = async function(io) {
     
     // 메시지 전송 처리
     socket.on('chatMessage', async (messageData) => {
+      console.log('=== CHAT MESSAGE REQUEST START ===');
+      console.log('Message data received:', {
+        hasUser: !!socket.user,
+        userId: socket.user?.id,
+        userName: socket.user?.name,
+        messageType: messageData?.type,
+        room: messageData?.room,
+        hasContent: !!messageData?.content,
+        hasFileData: !!messageData?.fileData,
+        requestId: messageData?.requestId,
+        timestamp: new Date().toISOString()
+      });
+
       try {
         if (!socket.user) {
+          console.error('❌ CHAT MESSAGE ERROR: User not authenticated');
           throw new Error('Unauthorized');
         }
 
         if (!messageData) {
+          console.error('❌ CHAT MESSAGE ERROR: No message data provided');
           throw new Error('메시지 데이터가 없습니다.');
         }
 
         const { room, type, content, fileData, requestId } = messageData;
 
         if (!room) {
+          console.error('❌ CHAT MESSAGE ERROR: No room provided');
           throw new Error('채팅방 정보가 없습니다.');
         }
+
+        console.log('📝 Processing message:', {
+          type,
+          room,
+          contentLength: content?.length || 0,
+          fileDataId: fileData?._id
+        });
 
         // 요청 ID 기반 중복 방지 (더 정확함)
         if (requestId) {
           const requestKey = `${socket.user.id}:${requestId}`;
           if (processedMessages.has(requestKey)) {
-            console.log('Duplicate request prevented:', requestKey);
+            console.log('⚠️ Duplicate request prevented:', requestKey);
             return;
           }
           processedMessages.set(requestKey, true);
@@ -596,57 +619,92 @@ module.exports = async function(io) {
           setTimeout(() => {
             processedMessages.delete(requestKey);
           }, 300000);
+          console.log('✅ Request ID processed:', requestKey);
         } else {
-          console.warn('Message received without requestId from user:', socket.user.id);
+          console.warn('⚠️ Message received without requestId from user:', socket.user.id);
         }
 
         // 채팅방 권한 확인
+        console.log('🔍 Checking room permissions...');
         const chatRoom = await Room.findOne({
           _id: room,
           participants: socket.user.id
         });
 
         if (!chatRoom) {
+          console.error('❌ ROOM ACCESS ERROR:', {
+            roomId: room,
+            userId: socket.user.id,
+            error: 'User not in room participants'
+          });
           throw new Error('채팅방 접근 권한이 없습니다.');
         }
+        console.log('✅ Room permission verified');
 
         // 세션 유효성 재확인
+        console.log('🔍 Validating session...');
         const sessionValidation = await SessionService.validateSession(
           socket.user.id, 
           socket.user.sessionId
         );
         
         if (!sessionValidation.isValid) {
+          console.error('❌ SESSION ERROR:', {
+            userId: socket.user.id,
+            sessionId: socket.user.sessionId,
+            validation: sessionValidation
+          });
           throw new Error('세션이 만료되었습니다. 다시 로그인해주세요.');
         }
+        console.log('✅ Session validated');
 
         // AI 멘션 확인
         const aiMentions = extractAIMentions(content);
         let message;
 
-        logDebug('message received', {
+        console.log('📋 Message processing details:', {
           type,
           room,
           userId: socket.user.id,
           hasFileData: !!fileData,
-          hasAIMentions: aiMentions.length
+          hasAIMentions: aiMentions.length,
+          aiMentions
         });
 
         // 메시지 타입별 처리
         switch (type) {
           case 'file':
+            console.log('📁 Processing file message...');
             if (!fileData || !fileData._id) {
+              console.error('❌ FILE MESSAGE ERROR: Invalid file data', {
+                hasFileData: !!fileData,
+                fileDataId: fileData?._id,
+                fileData
+              });
               throw new Error('파일 데이터가 올바르지 않습니다.');
             }
 
+            console.log('🔍 Looking up file in database:', fileData._id);
             const file = await File.findOne({
               _id: fileData._id,
               user: socket.user.id
             });
 
             if (!file) {
+              console.error('❌ FILE NOT FOUND ERROR:', {
+                fileId: fileData._id,
+                userId: socket.user.id,
+                searchResult: 'not found'
+              });
               throw new Error('파일을 찾을 수 없거나 접근 권한이 없습니다.');
             }
+
+            console.log('✅ File found in database:', {
+              fileId: file._id,
+              filename: file.filename,
+              originalname: file.originalname,
+              size: file.size
+            });
 
             message = new Message({
               room,
@@ -662,11 +720,14 @@ module.exports = async function(io) {
                 originalName: file.originalname
               }
             });
+            console.log('✅ File message object created');
             break;
 
           case 'text':
+            console.log('📝 Processing text message...');
             const messageContent = content?.trim() || messageData.msg?.trim();
             if (!messageContent) {
+              console.log('⚠️ Empty text message, ignoring');
               return;
             }
 
@@ -678,25 +739,37 @@ module.exports = async function(io) {
               timestamp: new Date(),
               reactions: {}
             });
+            console.log('✅ Text message object created');
             break;
 
           default:
+            console.error('❌ UNSUPPORTED MESSAGE TYPE:', type);
             throw new Error('지원하지 않는 메시지 타입입니다.');
         }
 
+        console.log('💾 Saving message to database...');
         await message.save();
+        console.log('✅ Message saved to database:', message._id);
+
+        console.log('📖 Populating message references...');
         await message.populate([
           { path: 'sender', select: 'name email profileImage' },
           { path: 'file', select: 'filename originalname mimetype size' }
         ]);
+        console.log('✅ Message populated');
 
         // 새 메시지 작성 시 해당 채팅방의 메시지 캐시 무효화
+        console.log('🗑️ Invalidating cache...');
         await CacheService.invalidateByTag(`room:${room}`);
+        console.log('✅ Cache invalidated');
 
+        console.log('📡 Broadcasting message to room...');
         io.to(room).emit('message', message);
+        console.log('✅ Message broadcasted');
 
         // AI 멘션이 있는 경우 AI 응답 생성 (중복 방지)
         if (aiMentions.length > 0) {
+          console.log('🤖 Processing AI mentions:', aiMentions);
           const originalMessageId = message._id.toString();
           for (const ai of aiMentions) {
             const query = content.replace(new RegExp(`@${ai}\\b`, 'g'), '').trim();
@@ -705,36 +778,59 @@ module.exports = async function(io) {
             // 중복 요청 방지
             if (!aiRequestLocks.has(requestKey)) {
               aiRequestLocks.set(requestKey, true);
+              console.log('🚀 Starting AI response:', { ai, requestKey });
               
               // 에러 처리를 포함하여 비동기로 호출
               handleAIResponse(io, room, ai, query, requestKey).catch(error => {
-                console.error(`AI response failed for key ${requestKey}:`, error);
+                console.error(`❌ AI response failed for key ${requestKey}:`, error);
                 // 락 해제는 handleAIResponse 내부에서 처리되므로 여기서 별도 처리 필요 없음
               });
 
             } else {
-              console.log(`AI request skipped (duplicate): ${ai} in room ${room}`);
+              console.log(`⚠️ AI request skipped (duplicate): ${ai} in room ${room}`);
             }
           }
         }
 
+        console.log('⏰ Updating user last activity...');
         await SessionService.updateLastActivity(socket.user.id);
+        console.log('✅ Last activity updated');
 
-        logDebug('message processed', {
+        console.log('=== CHAT MESSAGE SUCCESS ===', {
           messageId: message._id,
           type: message.type,
-          room
+          room,
+          timestamp: new Date().toISOString()
         });
 
       } catch (error) {
-        console.error('Message handling error:', error);
-        socket.emit('error', {
-          code: error.code || 'MESSAGE_ERROR',
-          message: error.message || '메시지 전송 중 오류가 발생했습니다.'
+        console.error('=== CHAT MESSAGE CRITICAL ERROR ===');
+        console.error('Error details:', {
+          message: error.message,
+          stack: error.stack,
+          name: error.name,
+          code: error.code,
+          userId: socket.user?.id,
+          messageData: {
+            type: messageData?.type,
+            room: messageData?.room,
+            hasContent: !!messageData?.content,
+            hasFileData: !!messageData?.fileData,
+            requestId: messageData?.requestId
+          },
+          timestamp: new Date().toISOString()
         });
+
+        socket.emit('error', {
+          message: error.message || '메시지 전송 중 오류가 발생했습니다.',
+          code: error.code || 'MESSAGE_ERROR',
+          timestamp: new Date().toISOString()
+        });
+
+        console.error('=== CHAT MESSAGE ERROR END ===');
       }
     });
-
+    
     // 채팅방 퇴장 처리
     socket.on('leaveRoom', async (roomId) => {
       try {

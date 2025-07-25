@@ -122,80 +122,82 @@ const getFileFromRequest = async (req) => {
 };
 
 exports.uploadFile = async (req, res) => {
+  console.log('=== FILE UPLOAD REQUEST START ===');
+  console.log('Request details:', {
+    hasFile: !!req.file,
+    userId: req.user?.id,
+    userAgent: req.headers['user-agent'],
+    contentType: req.headers['content-type'],
+    timestamp: new Date().toISOString()
+  });
+
+  if (req.file) {
+    console.log('File details:', {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      path: req.file.path,
+      fieldname: req.file.fieldname
+    });
+  }
+
   try {
     if (!req.file) {
+      console.error('❌ FILE UPLOAD ERROR: No file provided');
       return res.status(400).json({
         success: false,
         message: '파일이 선택되지 않았습니다.'
       });
     }
 
+    console.log('📁 Starting file hash generation...');
     // 파일 해시 생성 (중복 체크용)
     try {
       const fileBuffer = await fsPromises.readFile(req.file.path);
       const fileHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
+      console.log('✅ File hash generated:', fileHash);
 
-      // 캐시된 중복 파일 체크
-      const duplicateCheck = await CacheService.getFileDuplicate(fileHash, req.user.id, async () => {
-        // 동일한 해시와 크기를 가진 파일이 이미 존재하는지 확인
-        const existingFile = await File.findOne({
-          user: req.user.id,
-          size: req.file.size,
-          mimetype: req.file.mimetype
-        });
-
-        if (existingFile) {
-          // 실제 파일 내용이 같은지 검증
-          try {
-            const existingPath = path.join(uploadDir, existingFile.filename);
-            const existingBuffer = await fsPromises.readFile(existingPath);
-            const existingHash = crypto.createHash('md5').update(existingBuffer).digest('hex');
-            
-            if (existingHash === fileHash) {
-              return {
-                isDuplicate: true,
-                file: existingFile.toObject()
-              };
-            }
-          } catch (error) {
-            console.warn('Duplicate check read error:', error);
-          }
-        }
-
-        return { isDuplicate: false };
+      // 중복 파일 확인
+      const duplicateFile = await File.findOne({ 
+        user: req.user.id,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+        originalname: req.file.originalname
       });
 
-      // 중복 파일인 경우 기존 파일 정보 반환
-      if (duplicateCheck.isDuplicate) {
-        // 업로드된 임시 파일 삭제
+      if (duplicateFile) {
+        console.log('⚠️ Duplicate file detected, cleaning up temp file...');
         await fsPromises.unlink(req.file.path);
+        console.log('✅ Duplicate file handled, returning existing file');
         
-        return res.status(200).json({
+        return res.json({
           success: true,
-          message: '동일한 파일이 이미 존재합니다.',
-          duplicate: true,
-          file: {
-            _id: duplicateCheck.file._id,
-            filename: duplicateCheck.file.filename,
-            originalname: duplicateCheck.file.originalname,
-            mimetype: duplicateCheck.file.mimetype,
-            size: duplicateCheck.file.size,
-            uploadDate: duplicateCheck.file.uploadDate
+          message: '파일이 업로드되었습니다.',
+          data: {
+            file: {
+              _id: duplicateFile._id,
+              filename: duplicateFile.filename,
+              originalname: duplicateFile.originalname,
+              mimetype: duplicateFile.mimetype,
+              size: duplicateFile.size,
+              uploadDate: duplicateFile.uploadDate
+            }
           }
         });
       }
     } catch (hashError) {
-      console.error('File hash calculation error:', hashError);
-      return res.status(500).json({
-        success: false,
-        message: '파일 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.'
+      console.error('❌ FILE HASH ERROR:', {
+        error: hashError.message,
+        stack: hashError.stack,
+        filePath: req.file.path
       });
+      // 해시 에러는 무시하고 계속 진행
     }
 
     // 새 파일 저장 (S3 사용)
     const safeFilename = generateSafeFilename(req.file.originalname);
     
-    console.log('Starting S3 upload:', {
+    console.log('🚀 Starting S3 upload:', {
       originalname: req.file.originalname,
       safeFilename,
       tempPath: req.file.path,
@@ -210,7 +212,7 @@ exports.uploadFile = async (req, res) => {
       mimetype: req.file.mimetype,
     });
     
-    console.log('S3 upload completed, creating database record...');
+    console.log('✅ S3 upload completed, creating database record...');
 
     // 데이터베이스에 파일 정보 저장
     const file = new File({
@@ -223,14 +225,17 @@ exports.uploadFile = async (req, res) => {
     });
 
     await file.save();
-    console.log('Database record created successfully');
+    console.log('✅ Database record created successfully:', {
+      fileId: file._id,
+      filename: file.filename
+    });
     
     // 로컬 임시 파일 삭제
     try {
       await fsPromises.unlink(req.file.path);
-      console.log('Temporary file cleaned up');
+      console.log('✅ Temporary file cleaned up');
     } catch (cleanupError) {
-      console.warn('Failed to cleanup temporary file:', cleanupError.message);
+      console.warn('⚠️ Failed to cleanup temporary file:', cleanupError.message);
     }
 
     // 파일 업로드 완료 시 관련 캐시 무효화
@@ -238,34 +243,53 @@ exports.uploadFile = async (req, res) => {
       `user:${req.user.id}`,
       'file_duplicate'
     ]);
+    console.log('✅ Cache invalidated');
 
-    res.status(200).json({
+    console.log('=== FILE UPLOAD SUCCESS ===');
+    res.json({
       success: true,
-      message: '파일 업로드 성공',
-      duplicate: false,
-      file: {
-        _id: file._id,
-        filename: file.filename,
-        originalname: file.originalname,
-        mimetype: file.mimetype,
-        size: file.size,
-        uploadDate: file.uploadDate
+      message: '파일이 업로드되었습니다.',
+      data: {
+        file: {
+          _id: file._id,
+          filename: file.filename,
+          originalname: file.originalname,
+          mimetype: file.mimetype,
+          size: file.size,
+          uploadDate: file.uploadDate
+        }
       }
     });
 
   } catch (error) {
-    console.error('File upload error:', error);
+    console.error('=== FILE UPLOAD CRITICAL ERROR ===');
+    console.error('Error details:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name,
+      code: error.code,
+      statusCode: error.statusCode,
+      timestamp: new Date().toISOString(),
+      userId: req.user?.id,
+      fileName: req.file?.originalname,
+      fileSize: req.file?.size
+    });
+
     if (req.file?.path) {
       try {
         await fsPromises.unlink(req.file.path);
+        console.log('✅ Cleanup: Temporary file deleted after error');
       } catch (unlinkError) {
-        console.error('Failed to delete uploaded file:', unlinkError);
+        console.error('❌ Cleanup failed:', unlinkError.message);
       }
     }
+
+    console.error('=== FILE UPLOAD ERROR END ===');
     res.status(500).json({
       success: false,
       message: '파일 업로드 중 오류가 발생했습니다.',
-      error: error.message
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 };
