@@ -12,18 +12,28 @@ const aiService = require('../services/aiService');
 const CacheService = require('../services/cacheService');
 
 module.exports = async function(io) {
-  // Redis 어댑터 설정 (조건부)
+  // Redis 어댑터 설정 (기존 redisClient 활용)
   try {
-    if (process.env.REDIS_URL) {
+    const { redisHost, redisPort, redisPassword } = require('../config/keys');
+    
+    if (redisHost && redisPort) {
       console.log('Setting up Redis adapter for Socket.IO...');
-      const pubClient = createClient({ url: process.env.REDIS_URL });
+      
+      // 기존 Redis 설정을 사용하여 새로운 클라이언트 생성
+      const redisUrl = `redis://${redisHost}:${redisPort}`;
+      
+      const pubClient = createClient({
+        url: redisUrl,
+        password: redisPassword
+      });
       const subClient = pubClient.duplicate();
 
       await Promise.all([pubClient.connect(), subClient.connect()]);
+
       io.adapter(createAdapter(pubClient, subClient));
       console.log('✅ Redis adapter for Socket.IO initialized successfully');
     } else {
-      console.log('⚠️ REDIS_URL not found, using default memory adapter');
+      console.log('⚠️ Redis configuration not found, using default memory adapter');
     }
   } catch (error) {
     console.error('❌ Failed to initialize Redis adapter, using default memory adapter:', error);
@@ -35,6 +45,7 @@ module.exports = async function(io) {
   const messageQueues = new Map();
   const messageLoadRetries = new Map();
   const aiRequestLocks = new Map(); // AI 요청 중복 방지
+  const processedMessages = new Map(); // 메시지 중복 처리 방지
   const BATCH_SIZE = 30;  // 한 번에 로드할 메시지 수
   const LOAD_DELAY = 300; // 메시지 로드 딜레이 (ms)
   const MAX_RETRIES = 3;  // 최대 재시도 횟수
@@ -560,6 +571,19 @@ module.exports = async function(io) {
         if (!room) {
           throw new Error('채팅방 정보가 없습니다.');
         }
+
+        // 메시지 중복 처리 방지
+        const messageContent = content?.trim() || messageData.msg?.trim() || '';
+        const messageHash = `${socket.user.id}:${room}:${messageContent}:${type}:${Date.now()}`;
+        if (processedMessages.has(messageHash.substring(0, messageHash.lastIndexOf(':')))) {
+          console.log('Duplicate message prevented for user:', socket.user.id);
+          return;
+        }
+        processedMessages.set(messageHash.substring(0, messageHash.lastIndexOf(':')), true);
+        // 5초 후 해시 제거
+        setTimeout(() => {
+          processedMessages.delete(messageHash.substring(0, messageHash.lastIndexOf(':')));
+        }, 5000);
 
         // 채팅방 권한 확인
         const chatRoom = await Room.findOne({
