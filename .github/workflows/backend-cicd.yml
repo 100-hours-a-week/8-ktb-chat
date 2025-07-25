@@ -109,51 +109,103 @@ jobs:
           #!/bin/bash
           set -e
           
+          # 에러 발생 시 상세 로그 출력하는 함수
+          error_exit() {
+            echo "❌ 에러 발생: $1"
+            echo "📋 현재 상태 점검:"
+            echo "- 현재 디렉토리: $(pwd)"
+            echo "- 사용 가능한 메모리: $(free -h)"
+            echo "- 디스크 사용량: $(df -h)"
+            echo "- Node.js 버전: $(node --version 2>/dev/null || echo 'Node.js 없음')"
+            echo "- NPM 버전: $(npm --version 2>/dev/null || echo 'NPM 없음')"
+            echo "- PM2 상태: $(pm2 list 2>/dev/null || echo 'PM2 없음')"
+            exit 1
+          }
+          
           echo "🚀 자동 배포 시작..."
           
           # Node.js 및 PM2 강제 설치 (경로 문제 해결)
           echo "📦 Node.js 설치 중..."
-          curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash - || true
-          sudo yum install -y nodejs || true
+          curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash - || error_exit "Node.js 저장소 추가 실패"
+          sudo yum install -y nodejs || error_exit "Node.js 설치 실패"
           
           echo "📦 PM2 설치 중..."
-          sudo npm install -g pm2 || true
+          sudo npm install -g pm2 || error_exit "PM2 설치 실패"
           
           # PATH 환경변수 갱신
           export PATH=$PATH:/usr/bin:/usr/local/bin
           
+          # 설치 확인
+          echo "✅ 설치된 버전 확인:"
+          echo "- Node.js: $(node --version)"
+          echo "- NPM: $(npm --version)"
+          echo "- PM2: $(pm2 --version)"
+          
           echo "✅ 환경 설정 완료"
           
           # 시스템 최적화
-          sudo swapoff -a
+          echo "🔧 시스템 최적화 중..."
+          sudo swapoff -a || error_exit "스왑 비활성화 실패"
+          echo "✅ 스왑 비활성화 완료"
           
           # 코드 다운로드 및 .env 파일 생성
+          echo "📥 소스코드 다운로드 중..."
           cd /tmp && rm -rf ktb-new
-          git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new
+          git clone -b jacky2 https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new || error_exit "Git 클론 실패"
+          echo "✅ 소스코드 다운로드 완료"
           
           # .env 파일을 다운받은 코드 폴더에 직접 생성
+          echo "📝 환경 변수 파일 생성 중..."
           cat << 'EOF' > /tmp/ktb-new/backend/.env
           ${{ secrets.ENV_BACKEND_DEV }}
           EOF
+          echo "✅ .env 파일 생성 완료"
           
           # 애플리케이션 배포
-          sudo -u ec2-user pm2 delete all || true
-          sudo mkdir -p /opt/ktb-chat-backend
-          sudo cp -r ktb-new/backend /opt/ktb-chat-backend/
-          sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend
-          cd /opt/ktb-chat-backend/backend
-          sudo -u ec2-user npm ci --production
+          echo "🛑 기존 애플리케이션 정리 중..."
+          sudo -u ec2-user pm2 delete all || echo "⚠️ 기존 PM2 프로세스 없음"
+          
+          echo "📁 배포 디렉토리 설정 중..."
+          sudo mkdir -p /opt/ktb-chat-backend || error_exit "배포 디렉토리 생성 실패"
+          sudo cp -r ktb-new/backend /opt/ktb-chat-backend/ || error_exit "파일 복사 실패"
+          sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend || error_exit "권한 설정 실패"
+          
+          echo "📦 의존성 설치 중..."
+          cd /opt/ktb-chat-backend/backend || error_exit "배포 디렉토리 이동 실패"
+          
+          # package.json 확인
+          if [[ ! -f "package.json" ]]; then
+            error_exit "package.json 파일을 찾을 수 없습니다"
+          fi
+          
+          # .env 파일 확인
+          if [[ ! -f ".env" ]]; then
+            error_exit ".env 파일을 찾을 수 없습니다"
+          fi
+          
+          sudo -u ec2-user npm ci --production || error_exit "NPM 의존성 설치 실패"
+          echo "✅ 의존성 설치 완료"
           
           # PM2 클러스터 모드로 시작
+          echo "🚀 PM2 클러스터 모드로 애플리케이션 시작 중..."
           sudo -u ec2-user pm2 start server.js \
             --name 'ktb-backend-cluster' \
             -i 2 \
             --max-memory-restart 700M \
-            --node-args='--max-old-space-size=600'
-          sudo -u ec2-user pm2 save
-          sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user
+            --node-args='--max-old-space-size=600' || error_exit "PM2 애플리케이션 시작 실패"
           
-          sleep 5 && sudo -u ec2-user pm2 list
+          sudo -u ec2-user pm2 save || error_exit "PM2 설정 저장 실패"
+          sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user || error_exit "PM2 자동 시작 설정 실패"
+          
+          echo "⏳ 애플리케이션 시작 대기 중..."
+          sleep 5
+          
+          echo "📊 PM2 프로세스 상태 확인:"
+          sudo -u ec2-user pm2 list || error_exit "PM2 상태 확인 실패"
+          
+          echo "📊 애플리케이션 로그 확인 (최근 10줄):"
+          sudo -u ec2-user pm2 logs --lines 10 || echo "⚠️ 로그를 가져올 수 없습니다"
+          
           echo "✅ 배포 완료!"
 
     - name: ALB Target Group 헬스체크
@@ -207,10 +259,28 @@ jobs:
 
         # 최종 Public URL 헬스체크
         echo "🌐 최종 Public URL 헬스체크 중... (${{ env.PUBLIC_URL }}/health)"
-        if curl -f -L --max-redirs 3 ${{ env.PUBLIC_URL }}/health; then
-          echo "🎉 Public URL 헬스체크 성공!"
-        else
-          echo "⚠️ Public URL 헬스체크 실패."
+        HEALTH_CHECK_ATTEMPTS=3
+        HEALTH_CHECK_SUCCESS=false
+        
+        for attempt in $(seq 1 $HEALTH_CHECK_ATTEMPTS); do
+          echo "🔍 헬스체크 시도 ${attempt}/${HEALTH_CHECK_ATTEMPTS}..."
+          
+          if curl -f -L --max-redirs 3 --connect-timeout 10 --max-time 30 ${{ env.PUBLIC_URL }}/health; then
+            echo "🎉 Public URL 헬스체크 성공!"
+            HEALTH_CHECK_SUCCESS=true
+            break
+          else
+            echo "⚠️ 헬스체크 시도 ${attempt} 실패"
+            if [[ $attempt -lt $HEALTH_CHECK_ATTEMPTS ]]; then
+              echo "⏳ 10초 후 재시도..."
+              sleep 10
+            fi
+          fi
+        done
+        
+        if [[ "$HEALTH_CHECK_SUCCESS" != "true" ]]; then
+          echo "❌ Public URL 헬스체크가 ${HEALTH_CHECK_ATTEMPTS}번 모두 실패했습니다."
+          echo "🔍 ALB 및 Target Group 상태를 확인하세요."
           exit 1
         fi
         
@@ -220,12 +290,23 @@ jobs:
     - name: 배포 결과 요약
       if: always()
       run: |
-        echo "## 🚀 코드 배포 및 검증 완료" >> $GITHUB_STEP_SUMMARY
+        # 배포 성공/실패 상태 확인
+        if [[ "${{ job.status }}" == "success" ]]; then
+          echo "## 🎉 코드 배포 및 검증 성공" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "## ❌ 코드 배포 실패" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚨 실패 원인 분석" >> $GITHUB_STEP_SUMMARY
+          echo "- 배포 과정에서 오류가 발생했습니다" >> $GITHUB_STEP_SUMMARY
+          echo "- 위의 로그를 확인하여 구체적인 오류 메시지를 찾아보세요" >> $GITHUB_STEP_SUMMARY
+          echo "- 일반적인 원인: Node.js 설치 실패, Git 클론 실패, 의존성 설치 실패, PM2 시작 실패" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📋 배포 정보" >> $GITHUB_STEP_SUMMARY
         echo "- **배포 ID**: \`${{ steps.meta.outputs.deployment_id }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **커밋**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **브랜치**: dev" >> $GITHUB_STEP_SUMMARY
+        echo "- **브랜치**: jacky2" >> $GITHUB_STEP_SUMMARY
         echo "- **배포 시간**: ${{ steps.meta.outputs.timestamp }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🎯 배포 대상" >> $GITHUB_STEP_SUMMARY
@@ -255,7 +336,7 @@ jobs:
         echo "#!/bin/bash" >> $GITHUB_STEP_SUMMARY
         echo "set -e" >> $GITHUB_STEP_SUMMARY
         echo "sudo swapoff -a" >> $GITHUB_STEP_SUMMARY
-        echo "cd /tmp && rm -rf ktb-new && git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new" >> $GITHUB_STEP_SUMMARY
+        echo "cd /tmp && rm -rf ktb-new && git clone -b jacky2 https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new" >> $GITHUB_STEP_SUMMARY
         echo "sudo -u ec2-user pm2 delete all || true" >> $GITHUB_STEP_SUMMARY
         echo "sudo cp -r ktb-new/backend/* /opt/ktb-chat-backend/backend/ && cd /opt/ktb-chat-backend/backend" >> $GITHUB_STEP_SUMMARY
         echo "sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend" >> $GITHUB_STEP_SUMMARY
@@ -297,7 +378,7 @@ jobs:
         echo '```bash' >> $GITHUB_STEP_SUMMARY
         echo "#!/bin/bash" >> $GITHUB_STEP_SUMMARY
         echo "sudo swapoff -a" >> $GITHUB_STEP_SUMMARY
-        echo "cd /tmp && rm -rf ktb-new && git clone -b dev https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new" >> $GITHUB_STEP_SUMMARY
+        echo "cd /tmp && rm -rf ktb-new && git clone -b jacky2 https://github.com/100-hours-a-week/8-ktb-chat.git ktb-new" >> $GITHUB_STEP_SUMMARY
         echo "sudo -u ec2-user pm2 delete all || true" >> $GITHUB_STEP_SUMMARY
         echo "sudo cp -r ktb-new/backend/* /opt/ktb-chat-backend/backend/ && cd /opt/ktb-chat-backend/backend" >> $GITHUB_STEP_SUMMARY
         echo "sudo -u ec2-user npm ci --production" >> $GITHUB_STEP_SUMMARY
