@@ -174,7 +174,6 @@ process.on('SIGTERM', async () => {
 const startServer = async () => {
   try {
     // Socket.io 설정
-    await require('./sockets/chat')(io);
     console.log('✅ Socket.IO setup completed');
   } catch (error) {
     console.error('❌ Socket.IO setup failed:', error);
