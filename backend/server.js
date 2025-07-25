@@ -8,6 +8,8 @@ const path = require('path');
 const { router: roomsRouter, initializeSocket } = require('./routes/api/rooms');
 const routes = require('./routes');
 const { Server } = require('socket.io');
+const { createClient } = require('redis');
+const { createAdapter } = require('@socket.io/redis-adapter');
 
 const app = express();
 const server = http.createServer(app);
@@ -118,6 +120,38 @@ app.set('io', io);
 // 채팅 소켓 핸들러 초기화
 require('./sockets/chat')(io);
 
+// Redis 어댑터 설정 함수
+const setupRedisAdapter = async () => {
+  try {
+    const { redisHost, redisPort, redisPassword } = require('./config/keys');
+    
+    if (redisHost && redisPort) {
+      console.log('Setting up Redis adapter for Socket.IO cluster mode...');
+      
+      const pubClient = createClient({
+        url: `redis://${redisHost}:${redisPort}`,
+        password: redisPassword,
+        socket: {
+          reconnectStrategy: retries => Math.min(retries * 50, 1000)
+        }
+      });
+      const subClient = pubClient.duplicate();
+
+      pubClient.on('error', (err) => console.error('Redis Pub Client Error:', err));
+      subClient.on('error', (err) => console.error('Redis Sub Client Error:', err));
+
+      await Promise.all([pubClient.connect(), subClient.connect()]);
+
+      io.adapter(createAdapter(pubClient, subClient));
+      console.log('✅ Redis adapter for Socket.IO cluster mode initialized successfully');
+    } else {
+      console.log('⚠️ Redis configuration not found, using default memory adapter');
+    }
+  } catch (error) {
+    console.error('❌ Failed to initialize Redis adapter, using default memory adapter:', error);
+  }
+};
+
 // MongoDB 연결 상태 모니터링
 mongoose.connection.on('connected', () => {
   console.log('MongoDB Connected Successfully');
@@ -173,29 +207,23 @@ process.on('SIGTERM', async () => {
 // 서버 시작 함수
 const startServer = async () => {
   try {
-    // Socket.io 설정
-    console.log('✅ Socket.IO setup completed');
-  } catch (error) {
-    console.error('❌ Socket.IO setup failed:', error);
-    console.log('⚠️ Server will continue without Socket.IO');
-  }
+    await mongoose.connect(process.env.MONGO_URI, mongooseOptions);
+    console.log('MongoDB Connected');
+    
+    // Redis 어댑터 설정
+    await setupRedisAdapter();
 
-  // 서버 시작
-  mongoose.connect(process.env.MONGO_URI, mongooseOptions)
-    .then(() => {
-      console.log('MongoDB Connected');
-      server.listen(PORT, '0.0.0.0', () => {
-        console.log(`Server running on port ${PORT}`);
-        console.log('Environment:', process.env.NODE_ENV);
-        console.log('API Base URL:', `http://0.0.0.0:${PORT}/api`);
-      });
-    })
-    .catch(err => {
-      console.error('Server startup error:', err);
-      process.exit(1);
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`Server running on port ${PORT}`);
+      console.log('Environment:', process.env.NODE_ENV);
+      console.log('API Base URL:', `http://0.0.0.0:${PORT}/api`);
     });
+  } catch (err) {
+    console.error('Server startup error:', err);
+    process.exit(1);
+  }
 };
 
 startServer();
 
-module.exports = { app, server };
+module.exports = { app, server };startServer();
