@@ -204,7 +204,7 @@ jobs:
           sudo -u ec2-user pm2 list || error_exit "PM2 상태 확인 실패"
           
           echo "📊 애플리케이션 로그 확인 (최근 10줄):"
-          sudo -u ec2-user pm2 logs --lines 10 || echo "⚠️ 로그를 가져올 수 없습니다"
+          sudo -u ec2-user pm2 logs --lines 10 --nostream || echo "⚠️ 로그를 가져올 수 없습니다"
           
           echo "✅ 배포 완료!"
 
