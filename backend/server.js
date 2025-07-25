@@ -132,7 +132,14 @@ const setupRedisAdapter = async () => {
         url: `redis://${redisHost}:${redisPort}`,
         password: redisPassword,
         socket: {
-          reconnectStrategy: retries => Math.min(retries * 50, 1000)
+          reconnectStrategy: (retries) => {
+            // 재시도 횟수가 20번을 초과하면 에러 발생
+            if (retries > 20) {
+              return new Error('Redis 재연결 시도 횟수 초과');
+            }
+            // 재시도 간격을 점차 늘림 (최대 3초)
+            return Math.min(retries * 100, 3000);
+          }
         }
       });
       const subClient = pubClient.duplicate();
