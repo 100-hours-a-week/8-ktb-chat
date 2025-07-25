@@ -143,9 +143,17 @@ const authController = {
       // 강제 로그인 플래그 확인 (기존 세션 무시)
       const isForceLogin = req.body.forceLogin === true;
       
-      // 기존 세션 확인 시도 (자동 로그인이나 강제 로그인이 아닌 경우에만)
+      // 로그인 전에 기존 세션 정리 (임시 해결책)
+      console.log('Cleaning up existing sessions for user:', user._id);
+      try {
+        await SessionService.removeAllUserSessions(user._id);
+      } catch (cleanupError) {
+        console.error('Session cleanup error:', cleanupError);
+      }
+
+      // 기존 세션 확인 시도 (자동 로그인이나 강제 로그인이 아닌 경우에만) - 현재는 비활성화
       let existingSession = null;
-      if (!isAutoLogin && !isForceLogin) {
+      if (false && !isAutoLogin && !isForceLogin) {
         try {
           existingSession = await SessionService.getActiveSession(user._id);
         } catch (sessionError) {
