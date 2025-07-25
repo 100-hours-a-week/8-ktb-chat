@@ -150,34 +150,38 @@ export const useMessageHandling = (socketRef, currentUser, router, handleSession
            }
          );
 
-         console.log('✅ Upload response received:', {
-           success: uploadResponse?.success,
-           hasData: !!uploadResponse?.data,
-           hasFile: !!uploadResponse?.data?.file,
-           fileId: uploadResponse?.data?.file?._id,
-           filename: uploadResponse?.data?.file?.filename,
-           error: uploadResponse?.error || uploadResponse?.message
-         });
+         console.log('✅ Raw upload response:', uploadResponse);
 
-         if (!uploadResponse.success) {
+         if (!uploadResponse || !uploadResponse.success) {
+           const errorMsg = uploadResponse?.message || uploadResponse?.error || '파일 업로드에 실패했습니다.';
            console.error('❌ Upload failed:', {
-             message: uploadResponse.message,
-             error: uploadResponse.error,
-             details: uploadResponse.details
+             response: uploadResponse,
+             message: errorMsg
            });
-           throw new Error(uploadResponse.message || '파일 업로드에 실패했습니다.');
+           throw new Error(errorMsg);
          }
 
-         // 안전한 파일 데이터 추출
-         const fileData = uploadResponse?.data?.file;
-         if (!fileData || !fileData._id || !fileData.filename) {
-           console.error('❌ Invalid file data in upload response:', {
-             hasFileData: !!fileData,
-             fileId: fileData?._id,
-             filename: fileData?.filename,
-             fullResponse: uploadResponse
+         // 매우 안전한 파일 데이터 추출
+         let fileData = null;
+         try {
+           fileData = uploadResponse?.data?.file;
+           if (!fileData) {
+             throw new Error('응답에 파일 데이터가 없습니다.');
+           }
+           if (!fileData._id) {
+             throw new Error('파일 ID가 없습니다.');
+           }
+           if (!fileData.filename) {
+             throw new Error('파일명이 없습니다.');
+           }
+           console.log('✅ Valid file data extracted:', fileData);
+         } catch (extractError) {
+           console.error('❌ File data extraction failed:', {
+             error: extractError.message,
+             uploadResponse: uploadResponse,
+             fileData: fileData
            });
-           throw new Error('업로드 응답에 유효하지 않은 파일 데이터가 포함되어 있습니다.');
+           throw new Error(`파일 데이터 처리 오류: ${extractError.message}`);
          }
 
          console.log('📡 Emitting file message to socket...');
@@ -189,13 +193,13 @@ export const useMessageHandling = (socketRef, currentUser, router, handleSession
            fileData: {
              _id: fileData._id,
              filename: fileData.filename,
-             originalname: fileData.originalname,
-             mimetype: fileData.mimetype,
-             size: fileData.size
+             originalname: fileData.originalname || fileData.filename,
+             mimetype: fileData.mimetype || 'application/octet-stream',
+             size: fileData.size || 0
            }
          };
 
-         console.log('Message payload:', messagePayload);
+         console.log('📤 Message payload:', messagePayload);
          socketRef.current.emit('chatMessage', messagePayload);
          console.log('✅ File message emitted successfully');
 

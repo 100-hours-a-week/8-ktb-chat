@@ -257,6 +257,21 @@ exports.uploadFile = async (req, res) => {
     console.log('✅ Cache invalidated');
 
     console.log('=== FILE UPLOAD SUCCESS ===');
+    console.log('Sending response:', {
+      success: true,
+      message: '파일이 업로드되었습니다.',
+      data: {
+        file: {
+          _id: file._id,
+          filename: file.filename,
+          originalname: file.originalname,
+          mimetype: file.mimetype,
+          size: file.size,
+          uploadDate: file.uploadDate
+        }
+      }
+    });
+
     res.json({
       success: true,
       message: '파일이 업로드되었습니다.',
