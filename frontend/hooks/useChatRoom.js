@@ -31,10 +31,11 @@ export const useChatRoom = () => {
   const [isInitialized, setIsInitialized] = useState(false);
   
   // Refs
+  const initializingRef = useRef(false);
+  const setupPromiseRef = useRef(null);
   const messageInputRef = useRef(null);
   const messageLoadAttemptRef = useRef(0);
   const mountedRef = useRef(true);
-  const initializingRef = useRef(false);
   const setupCompleteRef = useRef(false);
   const socketInitializedRef = useRef(false);
   const cleanupInProgressRef = useRef(false);
@@ -539,7 +540,7 @@ export const useChatRoom = () => {
     mountedRef.current = true;
     
     // 라우터 쿼리가 준비되면 초기화 진행
-    if (router.query.room) {
+    if (router.isReady && router.query.room) {
       initializeChat();
     }
 
@@ -567,7 +568,7 @@ export const useChatRoom = () => {
         cleanup(CLEANUP_REASONS.UNMOUNT);
       }
     };
-  }, [router, cleanup, setupRoom, currentUser, isInitialized, setError]);
+  }, [router.isReady, router.query.room, cleanup, setupRoom, currentUser, isInitialized, setError]);
 
   // File handling hook
   const {

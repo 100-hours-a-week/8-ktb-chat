@@ -346,8 +346,12 @@ export const useRoomHandling = (
       return setupPromiseRef.current;
     }
 
-    setupPromiseRef.current = (async () => {
+    const setupPromise = (async () => {
       try {
+        if (initializingRef.current || setupCompleteRef.current) {
+          return;
+        }
+
         initializingRef.current = true;
         setLoading(true);
         setError(null);
@@ -433,10 +437,13 @@ export const useRoomHandling = (
       }
     })();
 
-    return setupPromiseRef.current;
+    setupPromiseRef.current = setupPromise;
+    return setupPromise;
   }, [
-    router,
-    socketRef,
+    router.query.room,
+    currentUser,
+    initializingRef,
+    setupCompleteRef,
     mountedRef,
     setupSocket,
     fetchRoomData,
@@ -448,8 +455,6 @@ export const useRoomHandling = (
     setRoom,
     setLoading,
     setIsInitialized,
-    initializingRef,
-    setupCompleteRef,
     clearAllTimeouts
   ]);
 

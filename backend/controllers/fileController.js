@@ -10,6 +10,7 @@ const { uploadDir } = require('../middleware/upload');
 const CacheService = require('../services/cacheService');
 
 const fsPromises = {
+  readFile: promisify(fs.readFile),
   writeFile: promisify(fs.writeFile),
   unlink: promisify(fs.unlink),
   access: promisify(fs.access),
@@ -114,56 +115,64 @@ exports.uploadFile = async (req, res) => {
     }
 
     // 파일 해시 생성 (중복 체크용)
-    const fileBuffer = await fsPromises.readFile(req.file.path);
-    const fileHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
+    try {
+      const fileBuffer = await fsPromises.readFile(req.file.path);
+      const fileHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
 
-    // 캐시된 중복 파일 체크
-    const duplicateCheck = await CacheService.getFileDuplicate(fileHash, req.user.id, async () => {
-      // 동일한 해시와 크기를 가진 파일이 이미 존재하는지 확인
-      const existingFile = await File.findOne({
-        user: req.user.id,
-        size: req.file.size,
-        mimetype: req.file.mimetype
+      // 캐시된 중복 파일 체크
+      const duplicateCheck = await CacheService.getFileDuplicate(fileHash, req.user.id, async () => {
+        // 동일한 해시와 크기를 가진 파일이 이미 존재하는지 확인
+        const existingFile = await File.findOne({
+          user: req.user.id,
+          size: req.file.size,
+          mimetype: req.file.mimetype
+        });
+
+        if (existingFile) {
+          // 실제 파일 내용이 같은지 검증
+          try {
+            const existingPath = path.join(uploadDir, existingFile.filename);
+            const existingBuffer = await fsPromises.readFile(existingPath);
+            const existingHash = crypto.createHash('md5').update(existingBuffer).digest('hex');
+            
+            if (existingHash === fileHash) {
+              return {
+                isDuplicate: true,
+                file: existingFile.toObject()
+              };
+            }
+          } catch (error) {
+            console.warn('Duplicate check read error:', error);
+          }
+        }
+
+        return { isDuplicate: false };
       });
 
-      if (existingFile) {
-        // 실제 파일 내용이 같은지 검증
-        try {
-          const existingPath = path.join(uploadDir, existingFile.filename);
-          const existingBuffer = await fsPromises.readFile(existingPath);
-          const existingHash = crypto.createHash('md5').update(existingBuffer).digest('hex');
-          
-          if (existingHash === fileHash) {
-            return {
-              isDuplicate: true,
-              file: existingFile.toObject()
-            };
+      // 중복 파일인 경우 기존 파일 정보 반환
+      if (duplicateCheck.isDuplicate) {
+        // 업로드된 임시 파일 삭제
+        await fsPromises.unlink(req.file.path);
+        
+        return res.status(200).json({
+          success: true,
+          message: '동일한 파일이 이미 존재합니다.',
+          duplicate: true,
+          file: {
+            _id: duplicateCheck.file._id,
+            filename: duplicateCheck.file.filename,
+            originalname: duplicateCheck.file.originalname,
+            mimetype: duplicateCheck.file.mimetype,
+            size: duplicateCheck.file.size,
+            uploadDate: duplicateCheck.file.uploadDate
           }
-        } catch (error) {
-          console.warn('Duplicate check read error:', error);
-        }
+        });
       }
-
-      return { isDuplicate: false };
-    });
-
-    // 중복 파일인 경우 기존 파일 정보 반환
-    if (duplicateCheck.isDuplicate) {
-      // 업로드된 임시 파일 삭제
-      await fsPromises.unlink(req.file.path);
-      
-      return res.status(200).json({
-        success: true,
-        message: '동일한 파일이 이미 존재합니다.',
-        duplicate: true,
-        file: {
-          _id: duplicateCheck.file._id,
-          filename: duplicateCheck.file.filename,
-          originalname: duplicateCheck.file.originalname,
-          mimetype: duplicateCheck.file.mimetype,
-          size: duplicateCheck.file.size,
-          uploadDate: duplicateCheck.file.uploadDate
-        }
+    } catch (hashError) {
+      console.error('File hash calculation error:', hashError);
+      return res.status(500).json({
+        success: false,
+        message: '파일 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.'
       });
     }
 
