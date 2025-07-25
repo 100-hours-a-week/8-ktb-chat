@@ -110,7 +110,15 @@ class AuthService {
 
   async login(credentials) {
     try {
-      const response = await axios.post(`${API_URL}/api/auth/login`, credentials);
+      // 로그인 요청에는 인증 헤더가 필요 없으므로 axios를 직접 사용
+      const response = await axios.post(`${API_URL}/api/auth/login`, credentials, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        withCredentials: true,
+        timeout: 30000
+      });
 
       if (response.data?.success && response.data?.token) {
         const userData = {
@@ -125,6 +133,15 @@ class AuthService {
 
         localStorage.setItem('user', JSON.stringify(userData));
         window.dispatchEvent(new Event('authStateChange'));
+        
+        // 로그인 성공 로그 추가
+        console.log('[Auth] Login successful, user data stored:', {
+          id: userData.id,
+          name: userData.name,
+          hasToken: !!userData.token,
+          hasSessionId: !!userData.sessionId
+        });
+        
         return userData;
       }
 
@@ -155,7 +172,7 @@ class AuthService {
   }
 
 
-  // logout 메소드 수정
+  // logout 메소드 수정 - 무한 리다이렉트 방지
   async logout() {
     try {
       const user = this.getCurrentUser();
@@ -165,12 +182,26 @@ class AuthService {
     } catch (error) {
       console.error('Logout error:', error);
     } finally {
-      console.log("??????");
-      socketService.disconnect();
+      console.log('[Auth] Cleaning up user session');
+      
+      // 소켓 연결 정리
+      if (typeof socketService !== 'undefined') {
+        socketService.disconnect();
+      }
+      
+      // 로컬 스토리지 정리
       localStorage.removeItem('user');
+      localStorage.removeItem('lastTokenVerification');
+      
       // 인증 상태 변경 이벤트 발생
-      window.dispatchEvent(new Event('authStateChange'));
-      window.location.href = '/';
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('authStateChange'));
+      }
+      
+      // 현재 페이지가 로그인 페이지가 아닌 경우에만 리다이렉트
+      if (typeof window !== 'undefined' && window.location.pathname !== '/') {
+        window.location.href = '/';
+      }
     }
   }
 
@@ -347,12 +378,7 @@ class AuthService {
         return true;
       }
 
-      const response = await axiosInstance.post('/api/auth/verify-token', {
-        headers: {
-          'x-auth-token': user.token,
-          'x-session-id': user.sessionId
-        }
-      });
+      const response = await api.post('/api/auth/verify-token');
 
       if (response.data.success) {
         // 토큰 검증 시간 업데이트
@@ -379,7 +405,9 @@ class AuthService {
   async refreshToken() {
     try {
       const user = this.getCurrentUser();
-      if (!user?.token) throw new Error('인증 정보가 없습니다.');
+      if (!user?.token || !user?.sessionId) {
+        throw new Error('인증 정보가 없습니다.');
+      }
 
       const response = await api.post('/api/auth/refresh-token');
 
@@ -387,15 +415,26 @@ class AuthService {
         const updatedUser = {
           ...user,
           token: response.data.token,
+          sessionId: response.data.sessionId || user.sessionId,
           lastActivity: Date.now()
         };
         localStorage.setItem('user', JSON.stringify(updatedUser));
+        
+        // 인증 상태 변경 이벤트 발생
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new Event('authStateChange'));
+        }
+        
+        console.log('[Auth] Token refreshed successfully');
         return response.data.token;
       }
 
       throw new Error('토큰 갱신에 실패했습니다.');
     } catch (error) {
       console.error('Token refresh error:', error);
+      
+      // 토큰 갱신 실패 시 로그아웃 처리
+      this.logout();
       throw this._handleError(error);
     }
   }

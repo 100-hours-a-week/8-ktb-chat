@@ -284,9 +284,11 @@ function ChatRoomsComponent() {
   }, [getRetryDelay]);
 
   const fetchRooms = useCallback(async (isLoadingMore = false) => {
-    if (!currentUser?.token || isLoadingRef.current) {
+    // 현재 유저나 토큰이 없으면 조기 종료
+    if (!currentUser?.token || !currentUser?.sessionId || isLoadingRef.current) {
       console.log('Fetch prevented:', { 
         hasToken: !!currentUser?.token, 
+        hasSessionId: !!currentUser?.sessionId,
         isLoading: isLoadingRef.current 
       });
       return;
@@ -341,6 +343,18 @@ function ChatRoomsComponent() {
 
     } catch (error) {
       console.error('Rooms fetch error:', error);
+      
+      // 401 에러 또는 인증 관련 에러 처리
+      if (error.response?.status === 401 || error.message?.includes('Authentication')) {
+        console.log('Authentication error detected, stopping further requests');
+        // 인증 에러 시 추가 요청 중지
+        isLoadingRef.current = false;
+        setLoading(false);
+        setLoadingMore(false);
+        // 에러는 axios 인터셉터에서 처리하므로 여기서는 조용히 종료
+        return;
+      }
+      
       handleFetchError(error, isLoadingMore);
     } finally {
       if (!isLoadingMore) {

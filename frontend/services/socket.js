@@ -83,8 +83,38 @@ class SocketService {
         const socketUrl = process.env.NEXT_PUBLIC_API_URL;
         console.log('[Socket] Connecting to:', socketUrl);
 
+        // 인증 정보가 options에 없으면 현재 사용자에서 가져오기
+        let authOptions = options.auth || {};
+        if (!authOptions.token || !authOptions.sessionId) {
+          const user = authService.getCurrentUser();
+          if (user?.token && user?.sessionId) {
+            authOptions = {
+              token: user.token,
+              sessionId: user.sessionId
+            };
+            console.log('[Socket] Using current user auth for connection:', {
+              hasToken: !!authOptions.token,
+              hasSessionId: !!authOptions.sessionId,
+              tokenLength: authOptions.token?.length,
+              sessionIdLength: authOptions.sessionId?.length
+            });
+          } else {
+            console.warn('[Socket] No authentication data available:', {
+              hasUser: !!user,
+              hasToken: !!user?.token,
+              hasSessionId: !!user?.sessionId
+            });
+          }
+        } else {
+          console.log('[Socket] Using provided auth options:', {
+            hasToken: !!authOptions.token,
+            hasSessionId: !!authOptions.sessionId
+          });
+        }
+
         this.socket = io(socketUrl, {
           ...options,
+          auth: authOptions, // ✅ 인증 정보 전달
           transports: ['websocket', 'polling'],
           reconnection: true,
           reconnectionAttempts: this.maxReconnectAttempts,
@@ -133,12 +163,24 @@ class SocketService {
     });
 
     this.socket.on('connect_error', (error) => {
-      console.error('[Socket] Connection error:', error);
+      console.error('[Socket] Connection error:', {
+        message: error.message,
+        description: error.description,
+        context: error.context,
+        type: error.type,
+        data: error.data
+      });
       
-      if (error.message === 'Invalid session') {
+      // 인증 관련 에러 처리
+      if (error.message === 'Invalid session' || 
+          error.message === 'Authentication error' ||
+          error.message === 'Token expired' ||
+          error.message === 'Invalid token') {
+        console.log('[Socket] Authentication error detected, attempting token refresh');
         authService.refreshToken()
           .then(() => this.reconnect())
           .catch(() => {
+            console.error('[Socket] Token refresh failed, logging out');
             authService.logout();
             reject(error);
           });

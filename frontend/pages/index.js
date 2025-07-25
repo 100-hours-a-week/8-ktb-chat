@@ -41,7 +41,53 @@ const Login = () => {
     connected: false 
   });
   const router = useRouter();
-  const { redirect } = router.query;
+  const { redirect, error: urlError } = router.query;
+
+  // URL 에러 파라미터 처리
+  useEffect(() => {
+    if (router.isReady && urlError) {
+      console.log('[Login] URL error detected:', urlError);
+      
+      let errorMessage = '';
+      let errorType = 'error';
+      
+      switch (urlError) {
+        case 'session_expired':
+          errorMessage = '세션이 만료되었습니다. 다시 로그인해주세요.';
+          errorType = 'warning';
+          break;
+        case 'no_auth':
+          errorMessage = '로그인이 필요합니다.';
+          errorType = 'info';
+          break;
+        case 'auth_error':
+          errorMessage = '인증 오류가 발생했습니다. 다시 로그인해주세요.';
+          errorType = 'error';
+          break;
+        case 'duplicate_login':
+          errorMessage = '다른 기기에서 로그인되어 현재 세션이 종료되었습니다.';
+          errorType = 'warning';
+          break;
+        default:
+          errorMessage = '로그인이 필요합니다.';
+          errorType = 'info';
+      }
+      
+      setError({
+        type: errorType,
+        title: '인증 알림',
+        message: errorMessage,
+        suggestion: errorType === 'error' ? '문제가 지속되면 페이지를 새로고침해주세요.' : null
+      });
+      
+      // URL에서 에러 파라미터 제거 (새로고침 시 중복 표시 방지)
+      const { error: _, ...cleanQuery } = router.query;
+      router.replace({
+        pathname: router.pathname,
+        query: cleanQuery
+      }, undefined, { shallow: true });
+    }
+  }, [router, router.isReady, urlError]);
 
   // 서버 연결 상태 확인
   useEffect(() => {

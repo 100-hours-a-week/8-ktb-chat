@@ -18,6 +18,11 @@ const RETRY_CONFIG = {
   retryableErrors: ['ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'ENETUNREACH', 'ERR_NETWORK']
 };
 
+// 전역 상태 관리 - 무한 리다이렉트 방지
+let isRedirecting = false;
+let isRefreshingToken = false;
+let tokenRefreshPromise = null;
+
 // 기본 설정으로 axios 인스턴스 생성
 const axiosInstance = axios.create({
   baseURL: API_BASE_URL || 'http://localhost:5000',
@@ -29,6 +34,9 @@ const axiosInstance = axios.create({
   }
 });
 
+// 대기 중인 요청 관리
+const pendingRequests = new Map();
+
 // 재시도 딜레이 계산 함수 
 const getRetryDelay = (retryCount) => {
   // 지수 백오프와 약간의 무작위성 추가
@@ -38,39 +46,54 @@ const getRetryDelay = (retryCount) => {
   return Math.min(delay, RETRY_CONFIG.maxDelayMs);
 };
 
-// 재시도 가능한 에러인지 판단하는 함수
+// 재시도 가능한 에러 판단
 const isRetryableError = (error) => {
-  if (!error) return false;
-  
-  // 네트워크 에러 코드 확인
   if (error.code && RETRY_CONFIG.retryableErrors.includes(error.code)) {
     return true;
   }
-  
-  // HTTP 상태 코드 확인
-  if (error.response?.status && RETRY_CONFIG.retryableStatuses.includes(error.response.status)) {
+  return !error.response || RETRY_CONFIG.retryableStatuses.includes(error.response.status);
+};
+
+// 중복 요청 방지
+const isDuplicateRequest = (config) => {
+  const requestKey = `${config.method}:${config.url}`;
+  if (pendingRequests.has(requestKey)) {
+    console.log('Duplicate request prevented:', requestKey);
     return true;
   }
-  
-  // 응답이 없는 경우 (네트워크 에러)
-  if (!error.response && error.request) {
-    return true;
-  }
-  
+  pendingRequests.set(requestKey, true);
   return false;
 };
 
-// 요청 취소 토큰 저장소
-const pendingRequests = new Map();
+// 안전한 로그아웃 및 리다이렉트 함수
+const handleAuthFailure = async (errorCode = 'session_expired') => {
+  // 이미 리다이렉트 중이면 중복 처리 방지
+  if (isRedirecting) {
+    console.log('Already redirecting, skipping duplicate auth failure handling');
+    return;
+  }
 
-// 이전 요청 취소 함수
-const cancelPendingRequests = (config) => {
-  const requestKey = `${config.method}:${config.url}`;
-  const previousRequest = pendingRequests.get(requestKey);
-  
-  if (previousRequest) {
-    previousRequest.cancel('Request canceled due to duplicate request');
-    pendingRequests.delete(requestKey);
+  try {
+    isRedirecting = true;
+    console.log(`[Auth] Handling auth failure with code: ${errorCode}`);
+    
+    // 로그아웃 처리
+    authService.logout();
+    
+    // 클라이언트 사이드에서만 리다이렉트
+    if (typeof window !== 'undefined') {
+      // 현재 페이지가 이미 로그인 페이지가 아닌 경우에만 리다이렉트
+      if (window.location.pathname !== '/') {
+        window.location.href = `/?error=${errorCode}`;
+      }
+    }
+  } catch (error) {
+    console.error('Error during auth failure handling:', error);
+  } finally {
+    // 3초 후 리다이렉트 상태 리셋 (혹시 모를 상황 대비)
+    setTimeout(() => {
+      isRedirecting = false;
+    }, 3000);
   }
 };
 
@@ -78,6 +101,13 @@ const cancelPendingRequests = (config) => {
 axiosInstance.interceptors.request.use(
   async (config) => {
     try {
+      // 중복 요청 체크
+      if (isDuplicateRequest(config)) {
+        const error = new Error('Duplicate request prevented');
+        error.code = 'DUPLICATE_REQUEST';
+        return Promise.reject(error);
+      }
+
       // 요청 데이터 검증
       if (config.method !== 'get' && !config.data) {
         config.data = {};
@@ -112,7 +142,19 @@ axiosInstance.interceptors.response.use(
   },
   async (error) => {
     const config = error.config || {};
+    
+    // 요청 키 제거
+    if (config.method && config.url) {
+      const requestKey = `${config.method}:${config.url}`;
+      pendingRequests.delete(requestKey);
+    }
+    
     config.retryCount = config.retryCount || 0;
+    
+    // 중복 요청 에러는 무시
+    if (error.code === 'DUPLICATE_REQUEST') {
+      return Promise.reject(error);
+    }
     
     // 요청이 취소된 경우
     if (axios.isCancel(error)) {
@@ -234,30 +276,56 @@ axiosInstance.interceptors.response.use(
       }
     };
 
-    // 401 에러 처리
-    if (status === 401) {
+    // 401 에러 처리 - 토큰 갱신 시도
+    if (status === 401 && !isRefreshingToken && !isRedirecting) {
       try {
-        const refreshed = await authService.refreshToken();
-        if (refreshed) {
-          // 토큰 갱신 성공 시 원래 요청 재시도
+        // 토큰 갱신이 이미 진행 중이면 기다림
+        if (tokenRefreshPromise) {
+          await tokenRefreshPromise;
           const user = authService.getCurrentUser();
           if (user?.token) {
             config.headers['x-auth-token'] = user.token;
+            config.headers['x-session-id'] = user.sessionId;
             return axiosInstance(config);
+          }
+        } else {
+          // 새로운 토큰 갱신 시도
+          isRefreshingToken = true;
+          tokenRefreshPromise = authService.refreshToken();
+          
+          const refreshed = await tokenRefreshPromise;
+          if (refreshed) {
+            // 토큰 갱신 성공 시 원래 요청 재시도
+            const user = authService.getCurrentUser();
+            if (user?.token) {
+              config.headers['x-auth-token'] = user.token;
+              config.headers['x-session-id'] = user.sessionId;
+              return axiosInstance(config);
+            }
           }
         }
       } catch (refreshError) {
         console.error('Token refresh failed:', refreshError);
-        authService.logout();
-        if (typeof window !== 'undefined') {
-          window.location.href = '/?error=session_expired';
-        }
+        // 토큰 갱신 실패 시 로그아웃 및 리다이렉트
+        await handleAuthFailure('session_expired');
+      } finally {
+        isRefreshingToken = false;
+        tokenRefreshPromise = null;
       }
+    }
+
+    // 이미 리다이렉트 중이면 에러만 던지고 추가 처리 안함
+    if (isRedirecting) {
+      throw enhancedError;
+    }
+
+    // 401 에러이고 토큰 갱신도 실패한 경우
+    if (status === 401) {
+      await handleAuthFailure('session_expired');
     }
 
     throw enhancedError;
   }
 );
 
-// 인스턴스 내보내기
 export default axiosInstance;
