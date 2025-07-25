@@ -8,7 +8,12 @@ const { promisify } = require('util');
 const crypto = require('crypto');
 const { uploadDir } = require('../middleware/upload');
 const CacheService = require('../services/cacheService');
-const { uploadToS3, getSignedUrlForView, deleteFromS3 } = require('../services/s3Service');
+const { 
+  saveFileToGridFS, 
+  getFileStreamFromGridFS, 
+  getFileInfoFromGridFS, 
+  deleteFileFromGridFS 
+} = require('../services/gridfsService');
 
 const fsPromises = {
   readFile: promisify(fs.readFile),
@@ -194,10 +199,10 @@ exports.uploadFile = async (req, res) => {
       // 해시 에러는 무시하고 계속 진행
     }
 
-    // 새 파일 저장 (S3 사용)
+    // 새 파일 저장 (GridFS 사용)
     const safeFilename = generateSafeFilename(req.file.originalname);
     
-    console.log('🚀 Starting S3 upload:', {
+    console.log('🚀 Starting GridFS upload:', {
       originalname: req.file.originalname,
       safeFilename,
       tempPath: req.file.path,
@@ -205,14 +210,18 @@ exports.uploadFile = async (req, res) => {
       size: req.file.size
     });
 
-    // S3에 파일 업로드
-    await uploadToS3({
-      path: req.file.path,
+    // 파일 버퍼 읽기
+    const fileBuffer = await fsPromises.readFile(req.file.path);
+
+    // GridFS에 파일 업로드
+    const gridfsFile = await saveFileToGridFS({
       filename: safeFilename,
+      originalname: req.file.originalname,
       mimetype: req.file.mimetype,
+      buffer: fileBuffer
     });
     
-    console.log('✅ S3 upload completed, creating database record...');
+    console.log('✅ GridFS upload completed, creating database record...');
 
     // 데이터베이스에 파일 정보 저장
     const file = new File({
@@ -221,13 +230,15 @@ exports.uploadFile = async (req, res) => {
       mimetype: req.file.mimetype,
       size: req.file.size,
       user: req.user.id,
-      path: `s3://${process.env.S3_BUCKET_NAME || 'pumati-loadtest'}/${safeFilename}`
+      path: `gridfs://${safeFilename}`, // GridFS 경로 표시
+      gridfsId: gridfsFile._id // GridFS 파일 ID 저장
     });
 
     await file.save();
     console.log('✅ Database record created successfully:', {
       fileId: file._id,
-      filename: file.filename
+      filename: file.filename,
+      gridfsId: gridfsFile._id
     });
     
     // 로컬 임시 파일 삭제
@@ -337,15 +348,42 @@ exports.downloadFile = async (req, res) => {
       }
     }
 
-    console.log('Generating S3 signed URL for download:', filename);
+    console.log('Getting file info from GridFS for download:', filename);
 
-    // S3에서 다운로드용 사전 서명된 URL 생성
-    const signedUrl = await getSignedUrlForView(filename, true);
+    // GridFS에서 파일 정보 조회
+    const gridfsFile = await getFileInfoFromGridFS(filename);
     
-    console.log('Redirecting to S3 download URL:', { filename, hasUrl: !!signedUrl });
+    // GridFS에서 파일 스트림 생성
+    const fileStream = getFileStreamFromGridFS(filename);
     
-    // 클라이언트를 S3 다운로드 URL로 리다이렉트
-    res.redirect(signedUrl);
+    console.log('Streaming file download from GridFS:', { 
+      filename, 
+      contentType: gridfsFile.contentType,
+      length: gridfsFile.length 
+    });
+
+    // 다운로드용 응답 헤더 설정
+    res.set({
+      'Content-Type': gridfsFile.contentType,
+      'Content-Length': gridfsFile.length,
+      'Content-Disposition': `attachment; filename="${encodeURIComponent(file.originalname || filename)}"`,
+      'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    });
+
+    // 파일 스트림을 응답으로 전송
+    fileStream.on('error', (error) => {
+      console.error('GridFS download streaming error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          message: '파일 다운로드 중 오류가 발생했습니다.'
+        });
+      }
+    });
+
+    fileStream.pipe(res);
 
   } catch (error) {
     console.error('DownloadFile error:', {
@@ -403,15 +441,41 @@ exports.viewFile = async (req, res) => {
       }
     }
 
-    console.log('Generating S3 signed URL for view:', filename);
+    console.log('Getting file info from GridFS:', filename);
 
-    // S3에서 미리보기용 사전 서명된 URL 생성
-    const signedUrl = await getSignedUrlForView(filename, false);
+    // GridFS에서 파일 정보 조회
+    const gridfsFile = await getFileInfoFromGridFS(filename);
     
-    console.log('Redirecting to S3 URL:', { filename, hasUrl: !!signedUrl });
+    // GridFS에서 파일 스트림 생성
+    const fileStream = getFileStreamFromGridFS(filename);
     
-    // 클라이언트를 S3 URL로 리다이렉트
-    res.redirect(signedUrl);
+    console.log('Streaming file from GridFS:', { 
+      filename, 
+      contentType: gridfsFile.contentType,
+      length: gridfsFile.length 
+    });
+
+    // 응답 헤더 설정
+    res.set({
+      'Content-Type': gridfsFile.contentType,
+      'Content-Length': gridfsFile.length,
+      'Content-Disposition': `inline; filename="${encodeURIComponent(file.originalname || filename)}"`,
+      'Cache-Control': 'public, max-age=31536000, immutable', // 1년 캐시
+      'Last-Modified': new Date(gridfsFile.uploadDate).toUTCString()
+    });
+
+    // 파일 스트림을 응답으로 전송
+    fileStream.on('error', (error) => {
+      console.error('GridFS streaming error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          message: '파일 스트리밍 중 오류가 발생했습니다.'
+        });
+      }
+    });
+
+    fileStream.pipe(res);
 
   } catch (error) {
     console.error('ViewFile error:', {
@@ -486,14 +550,14 @@ exports.deleteFile = async (req, res) => {
       });
     }
 
-    console.log('Deleting file from S3:', file.filename);
+    console.log('Deleting file from GridFS:', file.filename);
 
-    // S3에서 파일 삭제
+    // GridFS에서 파일 삭제
     try {
-      await deleteFromS3(file.filename);
-      console.log('File deleted from S3 successfully:', file.filename);
-    } catch (s3Error) {
-      console.warn('Failed to delete file from S3 (continuing with DB cleanup):', s3Error.message);
+      await deleteFileFromGridFS(file.filename);
+      console.log('File deleted from GridFS successfully:', file.filename);
+    } catch (gridfsError) {
+      console.warn('Failed to delete file from GridFS (continuing with DB cleanup):', gridfsError.message);
     }
 
     // 데이터베이스에서 파일 정보 삭제

@@ -50,15 +50,20 @@ const FileSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
-  user: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User',
-    required: true,
-    index: true
-  },
   path: { 
     type: String,
     required: true
+  },
+  gridfsId: {
+    type: mongoose.Schema.Types.ObjectId,
+    required: false,
+    index: true
+  },
+  user: { 
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+    index: true
   },
   uploadDate: { 
     type: Date, 
