@@ -158,6 +158,7 @@ jobs:
           echo "📝 환경 변수 파일 생성 중..."
           cat << 'EOF' > /tmp/ktb-new/backend/.env
           ${{ secrets.ENV_BACKEND_DEV }}
+          S3_BUCKET_NAME=pumati-loadtest
           EOF
           echo "✅ .env 파일 생성 완료"
           
