@@ -140,9 +140,12 @@ const authController = {
       // 자동 로그인 플래그 확인 (회원가입 직후 자동 로그인)
       const isAutoLogin = req.body.autoLogin === true;
       
-      // 기존 세션 확인 시도 (자동 로그인이 아닌 경우에만)
+      // 강제 로그인 플래그 확인 (기존 세션 무시)
+      const isForceLogin = req.body.forceLogin === true;
+      
+      // 기존 세션 확인 시도 (자동 로그인이나 강제 로그인이 아닌 경우에만)
       let existingSession = null;
-      if (!isAutoLogin) {
+      if (!isAutoLogin && !isForceLogin) {
         try {
           existingSession = await SessionService.getActiveSession(user._id);
         } catch (sessionError) {
@@ -150,85 +153,30 @@ const authController = {
         }
       }
 
-      if (existingSession && !isAutoLogin) {
-        const io = req.app.get('io');
-        
-        if (io) {
-          try {
-            // 중복 로그인 이벤트 발생 시 더 자세한 정보 제공
-            io.to(existingSession.socketId).emit('duplicate_login', {
-              type: 'new_login_attempt',
-              deviceInfo: req.headers['user-agent'],
-              ipAddress: req.ip,
-              timestamp: Date.now(),
-              location: req.headers['x-forwarded-for'] || req.connection.remoteAddress,
-              browser: req.headers['user-agent']
-            });
-
-            // Promise 기반의 응답 대기 로직 개선
-            const response = await new Promise((resolve, reject) => {
-              const timeout = setTimeout(() => {
-                reject(new Error('DUPLICATE_LOGIN_TIMEOUT'));
-              }, 60000); // 60초 타임아웃
-
-              const cleanup = () => {
-                clearTimeout(timeout);
-                io.removeListener('force_login', handleForceLogin);
-                io.removeListener('keep_existing_session', handleKeepSession);
-              };
-
-              const handleForceLogin = async (data) => {
-                try {
-                  if (data.token === existingSession.token) {
-                    // 기존 세션 종료 및 소켓 연결 해제
-                    await SessionService.removeSession(user._id, existingSession.sessionId);
-                    io.to(existingSession.socketId).emit('session_terminated', {
-                      reason: 'new_login',
-                      message: '다른 기기에서 로그인하여 현재 세션이 종료되었습니다.'
-                    });
-                    resolve('force_login');
-                  } else {
-                    reject(new Error('INVALID_TOKEN'));
-                  }
-                } catch (error) {
-                  reject(error);
-                } finally {
-                  cleanup();
-                }
-              };
-
-              const handleKeepSession = () => {
-                cleanup();
-                resolve('keep_existing');
-              };
-
-              io.once('force_login', handleForceLogin);
-              io.once('keep_existing_session', handleKeepSession);
-            });
-
-            // 응답에 따른 처리
-            if (response === 'keep_existing') {
-              return res.status(409).json({
-                success: false,
-                code: 'DUPLICATE_LOGIN_REJECTED',
-                message: '기존 세션을 유지하도록 선택되었습니다.'
-              });
-            }
-
-          } catch (error) {
-            if (error.message === 'DUPLICATE_LOGIN_TIMEOUT') {
-              return res.status(409).json({
-                success: false,
-                code: 'DUPLICATE_LOGIN_TIMEOUT',
-                message: '중복 로그인 요청이 시간 초과되었습니다.'
-              });
-            }
-            throw error;
-          }
-        } else {
-          // Socket.IO 연결이 없는 경우 자동으로 기존 세션 종료
+      // 강제 로그인인 경우 기존 세션 제거
+      if (isForceLogin) {
+        try {
           await SessionService.removeAllUserSessions(user._id);
+          console.log('Force login: existing sessions removed for user', user._id);
+        } catch (error) {
+          console.error('Failed to remove existing sessions during force login:', error);
         }
+      }
+
+      if (existingSession && !isAutoLogin && !isForceLogin) {
+        // 기존 세션이 있는 경우 409 Conflict로 응답하고 클라이언트에서 처리
+        return res.status(409).json({
+          success: false,
+          code: 'DUPLICATE_LOGIN_DETECTED',
+          message: '다른 기기에서 이미 로그인되어 있습니다.',
+          data: {
+            existingSession: {
+              deviceInfo: existingSession.metadata?.deviceInfo || 'Unknown Device',
+              loginTime: existingSession.createdAt,
+              lastActivity: existingSession.lastActivity
+            }
+          }
+        });
       }
 
       // 새 세션 생성

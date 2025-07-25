@@ -355,6 +355,73 @@ class SessionService {
   static generateSessionId() {
     return crypto.randomBytes(32).toString('hex');
   }
+
+  // 세션의 socketId 조회 (로그아웃 시 소켓 연결 해제용)
+  static async getSocketId(userId, sessionId) {
+    try {
+      if (!userId || !sessionId) {
+        console.error('getSocketId: userId and sessionId are required');
+        return null;
+      }
+
+      const sessionKey = this.getSessionKey(userId);
+      const sessionData = await this.getJson(sessionKey);
+
+      if (!sessionData || sessionData.sessionId !== sessionId) {
+        return null;
+      }
+
+      return sessionData.metadata?.socketId || null;
+    } catch (error) {
+      console.error('Get socket ID error:', error);
+      return null;
+    }
+  }
+
+  // 세션 갱신 (토큰 갱신 시 사용)
+  static async refreshSession(userId, sessionId) {
+    try {
+      if (!userId || !sessionId) {
+        throw new Error('userId and sessionId are required');
+      }
+
+      // 세션 유효성 검증
+      const validationResult = await this.validateSession(userId, sessionId);
+      if (!validationResult.isValid) {
+        throw new Error(validationResult.message || 'Invalid session');
+      }
+
+      // 세션 데이터 갱신 (validateSession에서 이미 lastActivity 갱신됨)
+      const sessionKey = this.getSessionKey(userId);
+      const sessionData = await this.getJson(sessionKey);
+
+      if (!sessionData) {
+        throw new Error('Session data not found');
+      }
+
+      // 새로운 만료 시간으로 모든 관련 키 갱신
+      const activeSessionKey = this.getActiveSessionKey(userId);
+      const userSessionsKey = this.getUserSessionsKey(userId);
+      const sessionIdKey = this.getSessionIdKey(sessionId);
+
+      await Promise.all([
+        redisClient.expire(sessionKey, this.SESSION_TTL),
+        redisClient.expire(activeSessionKey, this.SESSION_TTL),
+        redisClient.expire(userSessionsKey, this.SESSION_TTL),
+        redisClient.expire(sessionIdKey, this.SESSION_TTL)
+      ]);
+
+      return {
+        success: true,
+        sessionData,
+        expiresIn: this.SESSION_TTL
+      };
+
+    } catch (error) {
+      console.error('Refresh session error:', error);
+      throw error;
+    }
+  }
 }
 
 module.exports = SessionService;

@@ -160,6 +160,35 @@ class AuthService {
         throw new Error('이메일 주소가 없거나 비밀번호가 틀렸습니다.');
       }
 
+      if (error.response?.status === 409) {
+        // 중복 로그인 에러 처리
+        const errorData = error.response.data;
+        if (errorData.code === 'DUPLICATE_LOGIN_DETECTED') {
+          const existingSession = errorData.data?.existingSession;
+          const deviceInfo = existingSession?.deviceInfo || 'Unknown Device';
+          const loginTime = existingSession?.loginTime ? new Date(existingSession.loginTime).toLocaleString() : 'Unknown';
+          
+          // 중복 로그인 확인 대화상자
+          const shouldForceLogin = window.confirm(
+            `다른 기기에서 이미 로그인되어 있습니다.\n\n` +
+            `기기: ${deviceInfo}\n` +
+            `로그인 시간: ${loginTime}\n\n` +
+            `강제로 로그인하시겠습니까? (기존 세션이 종료됩니다)`
+          );
+          
+          if (shouldForceLogin) {
+            // 강제 로그인 시도
+            return this.forceLogin(credentials, autoLogin);
+          } else {
+            throw new Error('로그인이 취소되었습니다.');
+          }
+        }
+        
+        const errorMessage = errorData.message || '중복 로그인 오류가 발생했습니다.';
+        Toast.error(errorMessage);
+        throw new Error(errorMessage);
+      }
+
       if (error.response?.status === 429) {
         Toast.error('너무 많은 로그인 시도가 있었습니다. 잠시 후 다시 시도해주세요.');
         throw new Error('너무 많은 로그인 시도가 있었습니다.');
@@ -207,6 +236,63 @@ class AuthService {
       if (typeof window !== 'undefined' && window.location.pathname !== '/') {
         window.location.href = '/';
       }
+    }
+  }
+
+  // 강제 로그인 (기존 세션 제거 후 로그인)
+  async forceLogin(credentials, autoLogin = false) {
+    try {
+      const loginData = { ...credentials, forceLogin: true };
+      if (autoLogin) {
+        loginData.autoLogin = true;
+      }
+      
+      const response = await axios.post(`${API_URL}/api/auth/login`, loginData, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        withCredentials: true,
+        timeout: 30000
+      });
+
+      if (response.data?.success && response.data?.token) {
+        const userData = {
+          id: response.data.user._id,
+          name: response.data.user.name,
+          email: response.data.user.email,
+          profileImage: response.data.user.profileImage,
+          token: response.data.token,
+          sessionId: response.data.sessionId,
+          lastActivity: Date.now()
+        };
+
+        localStorage.setItem('user', JSON.stringify(userData));
+        window.dispatchEvent(new Event('authStateChange'));
+        
+        console.log('[Auth] Force login successful:', {
+          id: userData.id,
+          name: userData.name,
+          hasToken: !!userData.token,
+          hasSessionId: !!userData.sessionId
+        });
+        
+        return userData;
+      }
+
+      throw new Error(response.data?.message || '강제 로그인에 실패했습니다.');
+
+    } catch (error) {
+      console.error('Force login error:', error);
+      
+      // 강제 로그인에서는 409 에러가 발생하지 않아야 함
+      if (error.response?.status === 401) {
+        throw new Error('이메일 주소가 없거나 비밀번호가 틀렸습니다.');
+      }
+
+      const errorMessage = error.response?.data?.message || '강제 로그인 중 오류가 발생했습니다.';
+      Toast.error(errorMessage);
+      throw new Error(errorMessage);
     }
   }
 
