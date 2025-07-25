@@ -108,10 +108,15 @@ class AuthService {
     }
   }
 
-  async login(credentials) {
+  async login(credentials, autoLogin = false) {
     try {
       // 로그인 요청에는 인증 헤더가 필요 없으므로 axios를 직접 사용
-      const response = await axios.post(`${API_URL}/api/auth/login`, credentials, {
+      const loginData = { ...credentials };
+      if (autoLogin) {
+        loginData.autoLogin = true;
+      }
+      
+      const response = await axios.post(`${API_URL}/api/auth/login`, loginData, {
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json'

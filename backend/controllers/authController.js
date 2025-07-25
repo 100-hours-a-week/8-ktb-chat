@@ -137,15 +137,20 @@ const authController = {
         });
       }
 
-      // 기존 세션 확인 시도
+      // 자동 로그인 플래그 확인 (회원가입 직후 자동 로그인)
+      const isAutoLogin = req.body.autoLogin === true;
+      
+      // 기존 세션 확인 시도 (자동 로그인이 아닌 경우에만)
       let existingSession = null;
-      try {
-        existingSession = await SessionService.getActiveSession(user._id);
-      } catch (sessionError) {
-        console.error('Session check error:', sessionError);
+      if (!isAutoLogin) {
+        try {
+          existingSession = await SessionService.getActiveSession(user._id);
+        } catch (sessionError) {
+          console.error('Session check error:', sessionError);
+        }
       }
 
-      if (existingSession) {
+      if (existingSession && !isAutoLogin) {
         const io = req.app.get('io');
         
         if (io) {

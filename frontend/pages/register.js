@@ -117,8 +117,8 @@ const Register = () => {
       // 회원가입
       await authService.register({ name, email, password });
       
-      // 바로 로그인 처리
-      await authService.login({ email, password });
+      // 바로 로그인 처리 (자동 로그인 플래그 전달)
+      await authService.login({ email, password }, true);
       
       // 회원가입 성공 처리
       setShowSuccessModal(true);
