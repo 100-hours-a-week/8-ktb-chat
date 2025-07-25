@@ -12,37 +12,39 @@ const aiService = require('../services/aiService');
 const CacheService = require('../services/cacheService');
 
 module.exports = async function(io) {
-  // Redis 어댑터 설정 (클러스터 모드에서만 필요)
-  // 단일 인스턴스 모드에서는 비활성화
-  console.log('⚠️ Running in single instance mode, Redis adapter disabled');
-  
-  /*
+  // Redis 어댑터 설정 (클러스터 모드용)
   try {
     const { redisHost, redisPort, redisPassword } = require('../config/keys');
     
     if (redisHost && redisPort) {
-      console.log('Setting up Redis adapter for Socket.IO...');
+      console.log('Setting up Redis adapter for Socket.IO cluster mode...');
       
       // 기존 Redis 설정을 사용하여 새로운 클라이언트 생성
       const redisUrl = `redis://${redisHost}:${redisPort}`;
       
       const pubClient = createClient({
         url: redisUrl,
-        password: redisPassword
+        password: redisPassword,
+        socket: {
+          reconnectStrategy: (retries) => Math.min(retries * 50, 1000)
+        }
       });
       const subClient = pubClient.duplicate();
+
+      // 에러 핸들링 추가
+      pubClient.on('error', (err) => console.error('Redis Pub Client Error:', err));
+      subClient.on('error', (err) => console.error('Redis Sub Client Error:', err));
 
       await Promise.all([pubClient.connect(), subClient.connect()]);
 
       io.adapter(createAdapter(pubClient, subClient));
-      console.log('✅ Redis adapter for Socket.IO initialized successfully');
+      console.log('✅ Redis adapter for Socket.IO cluster mode initialized successfully');
     } else {
       console.log('⚠️ Redis configuration not found, using default memory adapter');
     }
   } catch (error) {
     console.error('❌ Failed to initialize Redis adapter, using default memory adapter:', error);
   }
-  */
   
   const connectedUsers = new Map();
   const streamingSessions = new Map();
@@ -527,7 +529,7 @@ module.exports = async function(io) {
             isStreaming: true
           }));
 
-        // 이벤트 발송
+        // 이벤트 발송 (입장 메시지는 모든 사람에게 전송)
         socket.emit('joinRoomSuccess', {
           roomId,
           participants: room.participants,
@@ -537,8 +539,9 @@ module.exports = async function(io) {
           activeStreams
         });
 
-        io.to(roomId).emit('message', joinMessage);
-        io.to(roomId).emit('participantsUpdate', room.participants);
+        // 입장 메시지는 방 전체에 브로드캐스트 (Redis 어댑터가 중복 방지)
+        socket.broadcast.to(roomId).emit('message', joinMessage);
+        socket.broadcast.to(roomId).emit('participantsUpdate', room.participants);
 
         logDebug('user joined room', {
           userId: socket.user.id,
@@ -686,7 +689,9 @@ module.exports = async function(io) {
         // 새 메시지 작성 시 해당 채팅방의 메시지 캐시 무효화
         await CacheService.invalidateByTag(`room:${room}`);
 
-        io.to(room).emit('message', message);
+        // 클러스터 모드에서는 본인과 다른 사용자를 구분해서 전송
+        socket.emit('message', message); // 본인에게 직접 전송
+        socket.broadcast.to(room).emit('message', message); // 다른 사용자들에게 브로드캐스트
 
         // AI 멘션이 있는 경우 AI 응답 생성 (중복 방지)
         if (aiMentions.length > 0) {

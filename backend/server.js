@@ -109,7 +109,10 @@ const io = new Server(server, {
   },
   transports: ['websocket', 'polling'],
   maxHttpBufferSize: 1e8, // 100MB
-  pingTimeout: 60000
+  pingTimeout: 60000,
+  // Sticky Session 활성화
+  allowEIO3: true,
+  serveClient: false
 });
 
 // 글로벌 소켓 설정

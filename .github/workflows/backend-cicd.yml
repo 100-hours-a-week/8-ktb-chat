@@ -186,12 +186,14 @@ jobs:
           sudo -u ec2-user npm ci --production || error_exit "NPM 의존성 설치 실패"
           echo "✅ 의존성 설치 완료"
           
-          # PM2 클러스터 모드로 시작
-          echo "🚀 PM2 단일 인스턴스 모드로 애플리케이션 시작 중..."
+          # PM2 클러스터 모드로 시작 (Sticky Session 적용)
+          echo "🚀 PM2 클러스터 모드로 애플리케이션 시작 중..."
           sudo -u ec2-user pm2 start server.js \
-            --name 'ktb-backend-single' \
+            --name 'ktb-backend-cluster' \
+            -i 2 \
             --max-memory-restart 700M \
-            --node-args='--max-old-space-size=600' || error_exit "PM2 애플리케이션 시작 실패"
+            --node-args='--max-old-space-size=600' \
+            --merge-logs || error_exit "PM2 애플리케이션 시작 실패"
           
           sudo -u ec2-user pm2 save || error_exit "PM2 설정 저장 실패"
           sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user --hp /home/ec2-user || error_exit "PM2 자동 시작 설정 실패"
