@@ -242,7 +242,13 @@ module.exports = function(io) {
       next();
 
     } catch (error) {
-      console.error('Socket authentication error:', error);
+      console.error('Socket authentication error:', {
+        error: error.message,
+        name: error.name,
+        stack: error.stack,
+        token: token ? 'present' : 'missing',
+        sessionId: sessionId ? 'present' : 'missing'
+      });
       
       if (error.name === 'TokenExpiredError') {
         return next(new Error('Token expired'));
@@ -507,7 +513,12 @@ module.exports = function(io) {
         });
 
       } catch (error) {
-        console.error('Join room error:', error);
+        console.error('Join room error:', {
+          error: error.message,
+          stack: error.stack,
+          userId: socket.user?.id,
+          roomId: roomId
+        });
         socket.emit('joinRoomError', {
           message: error.message || '채팅방 입장에 실패했습니다.'
         });
