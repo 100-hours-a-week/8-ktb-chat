@@ -639,22 +639,21 @@ module.exports = function(io) {
 
         // AI 멘션이 있는 경우 AI 응답 생성 (중복 방지)
         if (aiMentions.length > 0) {
+          const originalMessageId = message._id.toString();
           for (const ai of aiMentions) {
             const query = content.replace(new RegExp(`@${ai}\\b`, 'g'), '').trim();
-            const requestKey = `${room}:${ai}:${Date.now()}`;
+            const requestKey = `${room}:${ai}:${originalMessageId}`;
             
             // 중복 요청 방지
             if (!aiRequestLocks.has(requestKey)) {
               aiRequestLocks.set(requestKey, true);
               
-              try {
-                await handleAIResponse(io, room, ai, query);
-              } finally {
-                // 5초 후 락 해제
-                setTimeout(() => {
-                  aiRequestLocks.delete(requestKey);
-                }, 5000);
-              }
+              // 에러 처리를 포함하여 비동기로 호출
+              handleAIResponse(io, room, ai, query, requestKey).catch(error => {
+                console.error(`AI response failed for key ${requestKey}:`, error);
+                // 락 해제는 handleAIResponse 내부에서 처리되므로 여기서 별도 처리 필요 없음
+              });
+
             } else {
               console.log(`AI request skipped (duplicate): ${ai} in room ${room}`);
             }
@@ -944,7 +943,7 @@ module.exports = function(io) {
   }
 
   // AI 응답 처리 함수 개선 (큐 시스템 적용)
-  async function handleAIResponse(io, room, aiName, query) {
+  async function handleAIResponse(io, room, aiName, query, requestKey) {
     const messageId = `${aiName}-${Date.now()}`;
     let accumulatedContent = '';
     const timestamp = new Date();
@@ -1031,9 +1030,6 @@ module.exports = function(io) {
         },
         onComplete: async (finalContent) => {
           try {
-            // 스트리밍 세션 정리
-            streamingSessions.delete(messageId);
-
             // AI 메시지 저장
             const aiMessage = await Message.create({
               room,
@@ -1078,9 +1074,6 @@ module.exports = function(io) {
           } catch (saveError) {
             console.error('Failed to save AI message:', saveError);
             
-            // 저장 실패 시에도 스트리밍 세션 정리
-            streamingSessions.delete(messageId);
-            
             io.to(room).emit('aiMessageError', {
               messageId,
               error: '메시지 저장 중 오류가 발생했습니다.',
@@ -1088,13 +1081,18 @@ module.exports = function(io) {
               timestamp: new Date(),
               status: 'error'
             });
+          } finally {
+            // 스트리밍 세션 및 요청 락 정리
+            streamingSessions.delete(messageId);
+            if (requestKey) aiRequestLocks.delete(requestKey);
           }
         },
         onError: (error) => {
           console.error('AI response error:', error);
           
-          // 스트리밍 세션 정리
+          // 스트리밍 세션 및 요청 락 정리
           streamingSessions.delete(messageId);
+          if (requestKey) aiRequestLocks.delete(requestKey);
 
           // 에러 타입별 메시지 처리
           let errorMessage = 'AI 응답 생성 중 오류가 발생했습니다.';
@@ -1144,8 +1142,9 @@ module.exports = function(io) {
     } catch (error) {
       console.error('AI handler error:', error);
       
-      // 스트리밍 세션 정리
+      // 스트리밍 세션 및 요청 락 정리
       streamingSessions.delete(messageId);
+      if (requestKey) aiRequestLocks.delete(requestKey);
 
       // 큐 시스템 에러 메시지 전송
       io.to(room).emit('aiMessageError', {
