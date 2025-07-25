@@ -323,6 +323,19 @@ jobs:
           sudo cp -r ktb-new/backend /opt/ktb-chat-backend/ || error_exit "파일 복사 실패"
           sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend || error_exit "권한 설정 실패"
           
+          # uploads 디렉토리 생성 및 영구 보존 설정
+          echo "📁 uploads 디렉토리 설정 중..."
+          sudo mkdir -p /opt/ktb-chat-backend/uploads || error_exit "uploads 디렉토리 생성 실패"
+          sudo chown -R ec2-user:ec2-user /opt/ktb-chat-backend/uploads || error_exit "uploads 디렉토리 권한 설정 실패"
+          sudo chmod 755 /opt/ktb-chat-backend/uploads || error_exit "uploads 디렉토리 권한 변경 실패"
+          
+          # uploads 디렉토리를 백엔드 내부로 심볼릭 링크 생성 (기존 파일 보존)
+          if [[ ! -L "/opt/ktb-chat-backend/backend/uploads" ]]; then
+            sudo rm -rf /opt/ktb-chat-backend/backend/uploads 2>/dev/null || true
+            sudo -u ec2-user ln -sf /opt/ktb-chat-backend/uploads /opt/ktb-chat-backend/backend/uploads || error_exit "uploads 심볼릭 링크 생성 실패"
+            echo "✅ uploads 디렉토리 심볼릭 링크 생성 완료"
+          fi
+          
           echo "📦 의존성 설치 중..."
           cd /opt/ktb-chat-backend/backend || error_exit "배포 디렉토리 이동 실패"
           

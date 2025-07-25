@@ -293,17 +293,33 @@ exports.downloadFile = async (req, res) => {
   try {
     const { filename } = req.params;
     
-    console.log('DownloadFile request:', { filename, user: req.user?.id });
+    console.log('=== DOWNLOAD FILE REQUEST ===');
+    console.log('Request details:', { 
+      filename, 
+      user: req.user?.id,
+      userAgent: req.headers['user-agent'],
+      timestamp: new Date().toISOString()
+    });
 
     // 데이터베이스에서 파일 정보 조회
     const file = await File.findOne({ filename });
     if (!file) {
-      console.log('File not found in database:', filename);
+      console.log('❌ File not found in database:', filename);
       return res.status(404).json({ 
         success: false, 
         message: '파일을 찾을 수 없습니다.' 
       });
     }
+
+    console.log('✅ File found in database:', {
+      id: file._id,
+      filename: file.filename,
+      originalname: file.originalname,
+      size: file.size,
+      mimetype: file.mimetype,
+      savedPath: file.path,
+      user: file.user
+    });
 
     // 기본적인 접근 권한 확인 (파일 소유자인지 확인)
     if (file.user.toString() !== req.user.id.toString()) {
@@ -316,35 +332,62 @@ exports.downloadFile = async (req, res) => {
         });
         
         if (!room) {
-          console.log('Access denied for file download:', { filename, userId: req.user.id });
+          console.log('❌ Access denied for file download:', { filename, userId: req.user.id });
           return res.status(403).json({ 
             success: false, 
             message: '파일 다운로드 권한이 없습니다.' 
           });
         }
+        console.log('✅ Access granted via room participation');
       } else {
-        console.log('No message found and not owner for download:', { filename, userId: req.user.id });
+        console.log('❌ No message found and not owner for download:', { filename, userId: req.user.id });
         return res.status(403).json({ 
           success: false, 
           message: '파일 다운로드 권한이 없습니다.' 
         });
       }
+    } else {
+      console.log('✅ Access granted as file owner');
     }
 
     // 로컬 파일시스템에서 파일 확인
+    const uploadDir = path.join(__dirname, '../uploads');
     const filePath = file.path || path.join(uploadDir, filename);
+    
+    console.log('📁 Checking file paths:', {
+      uploadDir: uploadDir,
+      savedPath: file.path,
+      computedPath: filePath,
+      uploadDirExists: fs.existsSync(uploadDir),
+      filePathExists: fs.existsSync(filePath)
+    });
+    
+    // uploads 디렉토리 확인
+    if (!fs.existsSync(uploadDir)) {
+      console.error('❌ uploads 디렉토리가 존재하지 않습니다:', uploadDir);
+      return res.status(500).json({ 
+        success: false, 
+        message: '파일 저장소에 접근할 수 없습니다.' 
+      });
+    }
     
     try {
       await fsPromises.access(filePath, fs.constants.R_OK);
+      console.log('✅ File is readable:', filePath);
     } catch (error) {
-      console.error('File not found on filesystem:', { filename, filePath });
+      console.error('❌ File not found on filesystem:', { 
+        filename, 
+        filePath, 
+        error: error.message,
+        uploadDirContents: fs.readdirSync(uploadDir).slice(0, 10) // 처음 10개 파일만 로그
+      });
       return res.status(404).json({ 
         success: false, 
         message: '파일을 찾을 수 없습니다.' 
       });
     }
 
-    console.log('Streaming file download from filesystem:', { 
+    console.log('🚀 Starting file download stream:', { 
       filename, 
       filePath,
       contentType: file.mimetype
@@ -368,7 +411,7 @@ exports.downloadFile = async (req, res) => {
     fileStream.pipe(res);
     
     fileStream.on('error', (error) => {
-      console.error('File streaming error:', error);
+      console.error('❌ File streaming error:', error);
       if (!res.headersSent) {
         res.status(500).json({ 
           success: false, 
@@ -376,12 +419,18 @@ exports.downloadFile = async (req, res) => {
         });
       }
     });
+    
+    fileStream.on('end', () => {
+      console.log('✅ File download completed successfully:', filename);
+    });
 
   } catch (error) {
-    console.error('DownloadFile error:', {
+    console.error('=== DOWNLOAD FILE ERROR ===');
+    console.error('Error details:', {
       filename: req.params.filename,
       error: error.message,
-      stack: error.stack
+      stack: error.stack,
+      timestamp: new Date().toISOString()
     });
     res.status(500).json({ 
       success: false, 
@@ -394,17 +443,33 @@ exports.viewFile = async (req, res) => {
   try {
     const { filename } = req.params;
     
-    console.log('ViewFile request:', { filename, user: req.user?.id });
+    console.log('=== VIEW FILE REQUEST ===');
+    console.log('Request details:', { 
+      filename, 
+      user: req.user?.id,
+      userAgent: req.headers['user-agent'],
+      timestamp: new Date().toISOString()
+    });
 
     // 데이터베이스에서 파일 정보 조회
     const file = await File.findOne({ filename });
     if (!file) {
-      console.log('File not found in database:', filename);
+      console.log('❌ File not found in database:', filename);
       return res.status(404).json({ 
         success: false, 
         message: '파일을 찾을 수 없습니다.' 
       });
     }
+
+    console.log('✅ File found in database:', {
+      id: file._id,
+      filename: file.filename,
+      originalname: file.originalname,
+      size: file.size,
+      mimetype: file.mimetype,
+      savedPath: file.path,
+      user: file.user
+    });
 
     // 기본적인 접근 권한 확인 (파일 소유자인지 확인)
     if (file.user.toString() !== req.user.id.toString()) {
@@ -417,35 +482,62 @@ exports.viewFile = async (req, res) => {
         });
         
         if (!room) {
-          console.log('Access denied for file view:', { filename, userId: req.user.id });
+          console.log('❌ Access denied for file view:', { filename, userId: req.user.id });
           return res.status(403).json({ 
             success: false, 
             message: '파일에 접근할 권한이 없습니다.' 
           });
         }
+        console.log('✅ Access granted via room participation');
       } else {
-        console.log('No message found and not owner for view:', { filename, userId: req.user.id });
+        console.log('❌ No message found and not owner for view:', { filename, userId: req.user.id });
         return res.status(403).json({ 
           success: false, 
           message: '파일에 접근할 권한이 없습니다.' 
         });
       }
+    } else {
+      console.log('✅ Access granted as file owner');
     }
 
     // 로컬 파일시스템에서 파일 확인
+    const uploadDir = path.join(__dirname, '../uploads');
     const filePath = file.path || path.join(uploadDir, filename);
+    
+    console.log('📁 Checking file paths:', {
+      uploadDir: uploadDir,
+      savedPath: file.path,
+      computedPath: filePath,
+      uploadDirExists: fs.existsSync(uploadDir),
+      filePathExists: fs.existsSync(filePath)
+    });
+    
+    // uploads 디렉토리 확인
+    if (!fs.existsSync(uploadDir)) {
+      console.error('❌ uploads 디렉토리가 존재하지 않습니다:', uploadDir);
+      return res.status(500).json({ 
+        success: false, 
+        message: '파일 저장소에 접근할 수 없습니다.' 
+      });
+    }
     
     try {
       await fsPromises.access(filePath, fs.constants.R_OK);
+      console.log('✅ File is readable:', filePath);
     } catch (error) {
-      console.error('File not found on filesystem:', { filename, filePath });
+      console.error('❌ File not found on filesystem:', { 
+        filename, 
+        filePath, 
+        error: error.message,
+        uploadDirContents: fs.readdirSync(uploadDir).slice(0, 10) // 처음 10개 파일만 로그
+      });
       return res.status(404).json({ 
         success: false, 
         message: '파일을 찾을 수 없습니다.' 
       });
     }
 
-    console.log('Streaming file view from filesystem:', { 
+    console.log('🚀 Starting file view stream:', { 
       filename, 
       filePath,
       contentType: file.mimetype
@@ -468,7 +560,7 @@ exports.viewFile = async (req, res) => {
     fileStream.pipe(res);
     
     fileStream.on('error', (error) => {
-      console.error('File streaming error:', error);
+      console.error('❌ File streaming error:', error);
       if (!res.headersSent) {
         res.status(500).json({ 
           success: false, 
@@ -476,12 +568,18 @@ exports.viewFile = async (req, res) => {
         });
       }
     });
+    
+    fileStream.on('end', () => {
+      console.log('✅ File view completed successfully:', filename);
+    });
 
   } catch (error) {
-    console.error('ViewFile error:', {
+    console.error('=== VIEW FILE ERROR ===');
+    console.error('Error details:', {
       filename: req.params.filename,
       error: error.message,
-      stack: error.stack
+      stack: error.stack,
+      timestamp: new Date().toISOString()
     });
     res.status(500).json({ 
       success: false, 
