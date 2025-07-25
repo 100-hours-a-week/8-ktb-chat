@@ -172,12 +172,29 @@ process.on('SIGTERM', async () => {
 
 // 서버 시작 함수
 const startServer = async () => {
-  // Socket.io 설정
-  await require('./sockets/chat')(io);
+  try {
+    // Socket.io 설정
+    await require('./sockets/chat')(io);
+    console.log('✅ Socket.IO setup completed');
+  } catch (error) {
+    console.error('❌ Socket.IO setup failed:', error);
+    console.log('⚠️ Server will continue without Socket.IO');
+  }
 
-  // 서버 리스닝
-  const PORT = process.env.PORT || 5001;
-  server.listen(PORT, () => console.log(`Server is running on port ${PORT}`));
+  // 서버 시작
+  mongoose.connect(process.env.MONGO_URI, mongooseOptions)
+    .then(() => {
+      console.log('MongoDB Connected');
+      server.listen(PORT, '0.0.0.0', () => {
+        console.log(`Server running on port ${PORT}`);
+        console.log('Environment:', process.env.NODE_ENV);
+        console.log('API Base URL:', `http://0.0.0.0:${PORT}/api`);
+      });
+    })
+    .catch(err => {
+      console.error('Server startup error:', err);
+      process.exit(1);
+    });
 };
 
 startServer();

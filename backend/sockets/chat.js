@@ -12,12 +12,22 @@ const aiService = require('../services/aiService');
 const CacheService = require('../services/cacheService');
 
 module.exports = async function(io) {
-  const pubClient = createClient({ url: process.env.REDIS_URL });
-  const subClient = pubClient.duplicate();
+  // Redis 어댑터 설정 (조건부)
+  try {
+    if (process.env.REDIS_URL) {
+      console.log('Setting up Redis adapter for Socket.IO...');
+      const pubClient = createClient({ url: process.env.REDIS_URL });
+      const subClient = pubClient.duplicate();
 
-  await Promise.all([pubClient.connect(), subClient.connect()]);
-
-  io.adapter(createAdapter(pubClient, subClient));
+      await Promise.all([pubClient.connect(), subClient.connect()]);
+      io.adapter(createAdapter(pubClient, subClient));
+      console.log('✅ Redis adapter for Socket.IO initialized successfully');
+    } else {
+      console.log('⚠️ REDIS_URL not found, using default memory adapter');
+    }
+  } catch (error) {
+    console.error('❌ Failed to initialize Redis adapter, using default memory adapter:', error);
+  }
   
   const connectedUsers = new Map();
   const streamingSessions = new Map();
