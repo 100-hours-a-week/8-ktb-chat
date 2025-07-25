@@ -12,7 +12,11 @@ const aiService = require('../services/aiService');
 const CacheService = require('../services/cacheService');
 
 module.exports = async function(io) {
-  // Redis 어댑터 설정 (기존 redisClient 활용)
+  // Redis 어댑터 설정 (클러스터 모드에서만 필요)
+  // 단일 인스턴스 모드에서는 비활성화
+  console.log('⚠️ Running in single instance mode, Redis adapter disabled');
+  
+  /*
   try {
     const { redisHost, redisPort, redisPassword } = require('../config/keys');
     
@@ -38,6 +42,7 @@ module.exports = async function(io) {
   } catch (error) {
     console.error('❌ Failed to initialize Redis adapter, using default memory adapter:', error);
   }
+  */
   
   const connectedUsers = new Map();
   const streamingSessions = new Map();
@@ -532,8 +537,8 @@ module.exports = async function(io) {
           activeStreams
         });
 
-        socket.broadcast.to(roomId).emit('message', joinMessage);
-        socket.broadcast.to(roomId).emit('participantsUpdate', room.participants);
+        io.to(roomId).emit('message', joinMessage);
+        io.to(roomId).emit('participantsUpdate', room.participants);
 
         logDebug('user joined room', {
           userId: socket.user.id,
@@ -681,9 +686,7 @@ module.exports = async function(io) {
         // 새 메시지 작성 시 해당 채팅방의 메시지 캐시 무효화
         await CacheService.invalidateByTag(`room:${room}`);
 
-        // 메시지를 보낸 본인에게는 별도로 전송, 다른 사람들에게는 브로드캐스트
-        socket.emit('message', message);
-        socket.broadcast.to(room).emit('message', message);
+        io.to(room).emit('message', message);
 
         // AI 멘션이 있는 경우 AI 응답 생성 (중복 방지)
         if (aiMentions.length > 0) {
@@ -789,8 +792,8 @@ module.exports = async function(io) {
         messageLoadRetries.delete(queueKey);
 
         // 이벤트 발송
-        socket.broadcast.to(roomId).emit('message', leaveMessage);
-        socket.broadcast.to(roomId).emit('participantsUpdate', updatedRoom.participants);
+        io.to(roomId).emit('message', leaveMessage);
+        io.to(roomId).emit('participantsUpdate', updatedRoom.participants);
 
         console.log(`User ${socket.user.id} left room ${roomId} successfully`);
 
@@ -851,8 +854,8 @@ module.exports = async function(io) {
             ).populate('participants', 'name email profileImage');
 
             if (updatedRoom) {
-              socket.broadcast.to(roomId).emit('message', leaveMessage);
-              socket.broadcast.to(roomId).emit('participantsUpdate', updatedRoom.participants);
+              io.to(roomId).emit('message', leaveMessage);
+              io.to(roomId).emit('participantsUpdate', updatedRoom.participants);
             }
           }
         }
@@ -958,7 +961,7 @@ module.exports = async function(io) {
         }
 
         // 업데이트된 리액션 정보 브로드캐스트
-        socket.broadcast.to(message.room).emit('messageReactionUpdate', {
+        io.to(message.room).emit('messageReactionUpdate', {
           messageId,
           reactions: message.reactions
         });
